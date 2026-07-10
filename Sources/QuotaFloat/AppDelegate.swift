@@ -196,6 +196,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
   private var contentModeObserver: AnyCancellable?
   private var workspaceObserver: NSObjectProtocol?
   private var visibilityTimer: Timer?
+  private var codexAuthMonitor: CodexAuthMonitor?
   private var activeBundleIdentifier: String?
   private var activeAppHasVisibleWindow = false
   private var isRestoringFrame = false
@@ -220,7 +221,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     self.contentPreferences.setSelectedProviders([.codex])
     self.store.setActiveProviders([.codex])
     self.statusBarController = StatusBarQuotaController(store: self.store)
+    self.codexAuthMonitor = CodexAuthMonitor { [weak self] in
+      Task { @MainActor [weak self] in
+        self?.store.invalidateAndRefresh(.codex)
+      }
+    }
     self.store.start()
+    self.codexAuthMonitor?.start()
   }
 
   func applicationWillTerminate(_ notification: Notification) {
@@ -231,6 +238,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     self.visibilityTimer?.invalidate()
     self.displayModeObserver?.cancel()
     self.contentModeObserver?.cancel()
+    self.codexAuthMonitor?.stop()
     self.store.stop()
   }
 

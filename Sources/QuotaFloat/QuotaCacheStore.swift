@@ -29,7 +29,10 @@ final class QuotaCacheStore {
 
   func save(_ snapshots: [QuotaSnapshot]) {
     let persistentSnapshots = snapshots.filter(\.hasQuotaData)
-    guard !persistentSnapshots.isEmpty else { return }
+    guard !persistentSnapshots.isEmpty else {
+      try? FileManager.default.removeItem(at: self.fileURL)
+      return
+    }
 
     do {
       try FileManager.default.createDirectory(

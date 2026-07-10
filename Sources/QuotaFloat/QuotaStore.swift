@@ -89,6 +89,13 @@ final class QuotaStore: ObservableObject {
     self.refresh(providers: self.activeProviders, force: true)
   }
 
+  func invalidateAndRefresh(_ provider: QuotaProvider) {
+    self.snapshots.removeValue(forKey: provider)
+    self.lastAttemptByProvider.removeValue(forKey: provider)
+    self.cacheStore.save(Array(self.snapshots.values))
+    self.refresh(providers: [provider], force: true)
+  }
+
   func snapshot(for provider: QuotaProvider) -> QuotaSnapshot? {
     self.snapshots[provider]
   }
