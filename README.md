@@ -2,25 +2,23 @@
 
 <img src="Resources/AppIcon.png" alt="QuotaFloat App Icon" width="128">
 
-QuotaFloat 是一款原生 macOS 桌面悬浮额度工具，用于显示 Codex、Claude 和 Kimi Coding
-Plan 的 5 小时额度、周额度、重置倒计时与使用节奏。
+QuotaFloat 是一款原生 macOS 菜单栏额度工具，用于显示 Codex 的 5 小时额度、周额度和重置详情。
 
 ## 当前支持
 
 - macOS 14 或更高版本
 - **仅支持 Apple Silicon（M1、M2、M3、M4 等 arm64 Mac）**
-- Codex、Claude 和 Kimi Coding Plan
+- Codex
 
 当前公开构建不支持 Intel Mac。
 
 ## 功能
 
 - `CodexBarCore` 直接编译进应用，无需另外安装 CodexBar。
-- 每 2 分钟只刷新当前选择显示的服务，也可以手动立即刷新。
-- 支持只显示一个服务或同时显示多个服务。
-- 支持始终显示，或仅在 Codex、Claude、Terminal / iTerm 中显示。
+- 菜单栏直接显示 Codex 的 5 小时额度与周额度剩余百分比。
+- 每 2 分钟刷新 Codex，也可以从菜单中手动立即刷新。
 - 网络失败时保留最后一次成功数据，并标记缓存或过期状态。
-- 无 Dock 运行图标，悬浮窗口置顶并记住不同应用中的位置和尺寸。
+- 无 Dock 运行图标，只在 macOS 顶部菜单栏显示。
 
 ## 安装
 
@@ -71,11 +69,12 @@ Keychain API 读取方式；但 macOS 仍可能根据用户钥匙串状态和访
 
 在浮窗上点击右键，选择“设置 Kimi API Key…”，输入 Kimi Coding Plan API Key。
 
-密钥保存在：
+新版本会优先将密钥保存在 macOS 钥匙串中。若你曾使用旧版本，旧的文件密钥会在首次读取时自动迁移
+到钥匙串；右键选择“清除 Kimi API Key”会同时清除钥匙串与旧文件中的密钥。
+
+旧版本曾使用的本地文件路径为：
 
 `~/Library/Application Support/QuotaFloat/kimi-code-api-key`
-
-文件权限为 `600`，仅当前用户可读。
 
 ## 隐私
 
@@ -115,6 +114,12 @@ swift run QuotaFloat --self-test
 ```
 
 自检不会请求 Codex、Claude 或 Kimi。
+
+也可以运行单元测试：
+
+```bash
+swift test
+```
 
 ## 开源许可
 

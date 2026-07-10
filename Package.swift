@@ -24,5 +24,8 @@ let package = Package(
       resources: [
         .copy("Resources/claude-mark.svg"),
         .copy("Resources/kimi-mark.svg")
-      ])
+      ]),
+    .testTarget(
+      name: "QuotaFloatTests",
+      dependencies: ["QuotaFloat"])
   ])

@@ -10,7 +10,9 @@ QuotaFloat 是本地运行的开源 macOS 工具，不包含账号系统、广�
   access token 和权限范围。凭证只在当前进程内存中用于请求 Anthropic 官方额度接口。QuotaFloat
   不启用容易反复弹窗的 Keychain API 读取方式，但 macOS 仍可能根据钥匙串状态要求系统授权。
 - **Kimi**：由用户在 QuotaFloat 中手动输入 Coding Plan API Key。密钥保存在
-  `~/Library/Application Support/QuotaFloat/kimi-code-api-key`，文件权限设置为 `600`。
+  macOS 钥匙串中。旧版本保存在
+  `~/Library/Application Support/QuotaFloat/kimi-code-api-key` 的密钥会在首次读取时自动迁移到
+  钥匙串；清除密钥时会同时清除钥匙串项与旧文件。
 
 QuotaFloat 不会把 Codex、Claude 或 Kimi 凭证写入项目目录，也不会在正常日志中输出凭证内容。
 

@@ -21,7 +21,7 @@ enum QuotaFetchError: LocalizedError, Sendable {
 
 struct CodexBarQuotaFetcher: QuotaFetching {
   private let baseEnvironment: [String: String]
-  private let kimiAPIKeyStore: KimiAPIKeyStore
+  private let kimiAPIKeyStore: any KimiAPIKeyStoring
   private let claudeOAuthLoader: ClaudeOAuthSecurityCLILoader
   private let browserDetection: BrowserDetection
   private let codexFetcher: UsageFetcher
@@ -30,7 +30,7 @@ struct CodexBarQuotaFetcher: QuotaFetching {
 
   init(
     environment: [String: String] = ProcessInfo.processInfo.environment,
-    kimiAPIKeyStore: KimiAPIKeyStore = KimiAPIKeyStore()
+    kimiAPIKeyStore: any KimiAPIKeyStoring = SecureKimiAPIKeyStore()
   ) {
     let browserDetection = BrowserDetection()
     self.baseEnvironment = environment

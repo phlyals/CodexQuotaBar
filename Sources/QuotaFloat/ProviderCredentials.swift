@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import Security
 
 struct ClaudeOAuthEnvironmentCredentials: Equatable, Sendable {
   let accessToken: String
@@ -76,7 +77,19 @@ struct ClaudeOAuthSecurityCLILoader: Sendable {
   }
 }
 
-struct KimiAPIKeyStore: Sendable {
+protocol KimiAPIKeyStoring: Sendable {
+  func load() -> String?
+  func save(_ apiKey: String) throws
+  func clear() throws
+}
+
+protocol KeychainPasswordStoring: Sendable {
+  func load() throws -> String?
+  func save(_ value: String) throws
+  func clear() throws
+}
+
+struct KimiAPIKeyStore: KimiAPIKeyStoring {
   let fileURL: URL
 
   init(fileURL: URL = Self.defaultFileURL()) {
@@ -122,20 +135,120 @@ struct KimiAPIKeyStore: Sendable {
   }
 }
 
+struct SecureKimiAPIKeyStore: KimiAPIKeyStoring {
+  private let keychain: any KeychainPasswordStoring
+  private let fileFallback: KimiAPIKeyStore
+
+  init(
+    keychain: any KeychainPasswordStoring = KeychainPasswordStore(
+      service: "local.channoey.quotafloat.kimi",
+      account: "coding-plan-api-key"),
+    fileFallback: KimiAPIKeyStore = KimiAPIKeyStore()
+  ) {
+    self.keychain = keychain
+    self.fileFallback = fileFallback
+  }
+
+  func load() -> String? {
+    if let keychainValue = try? self.keychain.load() {
+      return keychainValue
+    }
+
+    guard let fileValue = self.fileFallback.load() else { return nil }
+    try? self.save(fileValue)
+    return fileValue
+  }
+
+  func save(_ apiKey: String) throws {
+    let value = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !value.isEmpty else { throw KimiAPIKeyStoreError.emptyKey }
+    try self.keychain.save(value)
+  }
+
+  func clear() throws {
+    try self.keychain.clear()
+    try self.fileFallback.clear()
+  }
+}
+
+struct KeychainPasswordStore: KeychainPasswordStoring {
+  let service: String
+  let account: String
+
+  func load() throws -> String? {
+    var query = self.baseQuery()
+    query[kSecReturnData as String] = true
+    query[kSecMatchLimit as String] = kSecMatchLimitOne
+
+    var item: CFTypeRef?
+    let status = SecItemCopyMatching(query as CFDictionary, &item)
+    if status == errSecItemNotFound { return nil }
+    guard status == errSecSuccess else { throw KimiAPIKeyStoreError.keychainStatus(status) }
+    guard
+      let data = item as? Data,
+      let value = String(data: data, encoding: .utf8)
+    else {
+      return nil
+    }
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? nil : trimmed
+  }
+
+  func save(_ value: String) throws {
+    let data = Data(value.utf8)
+    var query = self.baseQuery()
+    query[kSecValueData as String] = data
+    query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+
+    let status = SecItemAdd(query as CFDictionary, nil)
+    if status == errSecDuplicateItem {
+      let updateStatus = SecItemUpdate(
+        self.baseQuery() as CFDictionary,
+        [kSecValueData as String: data] as CFDictionary)
+      guard updateStatus == errSecSuccess else {
+        throw KimiAPIKeyStoreError.keychainStatus(updateStatus)
+      }
+      return
+    }
+    guard status == errSecSuccess else { throw KimiAPIKeyStoreError.keychainStatus(status) }
+  }
+
+  func clear() throws {
+    let status = SecItemDelete(self.baseQuery() as CFDictionary)
+    guard status == errSecSuccess || status == errSecItemNotFound else {
+      throw KimiAPIKeyStoreError.keychainStatus(status)
+    }
+  }
+
+  private func baseQuery() -> [String: Any] {
+    [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: self.service,
+      kSecAttrAccount as String: self.account,
+    ]
+  }
+}
+
 enum KimiAPIKeyStoreError: LocalizedError {
   case emptyKey
+  case keychainStatus(OSStatus)
 
   var errorDescription: String? {
-    "Kimi Coding Plan API Key不能为空。"
+    switch self {
+    case .emptyKey:
+      "Kimi Coding Plan API Key不能为空。"
+    case .keychainStatus(let status):
+      "无法访问 macOS 钥匙串（状态码 \(status)）。"
+    }
   }
 }
 
 @MainActor
 final class ProviderCredentialPreferences: ObservableObject {
-  let kimiAPIKeyStore: KimiAPIKeyStore
+  let kimiAPIKeyStore: any KimiAPIKeyStoring
   @Published private(set) var hasKimiAPIKey: Bool
 
-  init(kimiAPIKeyStore: KimiAPIKeyStore = KimiAPIKeyStore()) {
+  init(kimiAPIKeyStore: any KimiAPIKeyStoring = SecureKimiAPIKeyStore()) {
     self.kimiAPIKeyStore = kimiAPIKeyStore
     self.hasKimiAPIKey = kimiAPIKeyStore.load() != nil
   }
@@ -148,7 +261,7 @@ final class ProviderCredentialPreferences: ObservableObject {
     let alert = NSAlert()
     alert.messageText = "设置 Kimi Coding Plan API Key"
     alert.informativeText =
-      "API Key仅保存在本机 QuotaFloat配置目录中，文件权限为仅当前用户可读，不写入钥匙串。"
+      "API Key仅保存在本机 macOS 钥匙串中；旧版本文件密钥会在首次读取时自动迁移。"
     alert.alertStyle = .informational
     alert.accessoryView = field
     alert.addButton(withTitle: "保存")

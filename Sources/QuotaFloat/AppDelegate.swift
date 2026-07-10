@@ -7,26 +7,23 @@ import SwiftUI
 
 @MainActor
 final class DisplayPreferences: ObservableObject {
-  private static let configurationVersion = 2
-  private static let configurationVersionKey = "QuotaFloatDisplayConfigurationVersion"
-  private static let legacyStorageKey = "QuotaFloatDisplayMode"
-  private static let alwaysStorageKey = "QuotaFloatAlwaysDisplay"
-  private static let selectedAppsStorageKey = "QuotaFloatSelectedApps"
+  static let configurationVersion = 2
+  static let configurationVersionKey = "QuotaFloatDisplayConfigurationVersion"
+  static let legacyStorageKey = "QuotaFloatDisplayMode"
+  static let alwaysStorageKey = "QuotaFloatAlwaysDisplay"
+  static let selectedAppsStorageKey = "QuotaFloatSelectedApps"
 
   @Published private(set) var alwaysDisplay: Bool
   @Published private(set) var selectedApps: Set<String>
+  private let defaults: UserDefaults
   static let terminalBundleIdentifiers: Set<String> = [
     "com.googlecode.iterm2",
     "com.apple.Terminal",
   ]
 
-  init() {
-    let defaults = UserDefaults.standard
-    if defaults.integer(forKey: Self.configurationVersionKey) < Self.configurationVersion {
-      self.alwaysDisplay = true
-      self.selectedApps = []
-      self.save()
-    } else if defaults.object(forKey: Self.alwaysStorageKey) != nil {
+  init(defaults: UserDefaults = .standard) {
+    self.defaults = defaults
+    if defaults.object(forKey: Self.alwaysStorageKey) != nil {
       self.alwaysDisplay = defaults.bool(forKey: Self.alwaysStorageKey)
       self.selectedApps = Set(
         defaults.stringArray(forKey: Self.selectedAppsStorageKey) ?? [])
@@ -38,6 +35,10 @@ final class DisplayPreferences: ObservableObject {
         shouldAlwaysDisplay
         ? []
         : ["com.openai.codex", "com.anthropic.claudefordesktop"]
+      self.save()
+    }
+
+    if defaults.integer(forKey: Self.configurationVersionKey) < Self.configurationVersion {
       self.save()
     }
   }
@@ -77,10 +78,9 @@ final class DisplayPreferences: ObservableObject {
   }
 
   private func save() {
-    let defaults = UserDefaults.standard
-    defaults.set(Self.configurationVersion, forKey: Self.configurationVersionKey)
-    defaults.set(self.alwaysDisplay, forKey: Self.alwaysStorageKey)
-    defaults.set(Array(self.selectedApps).sorted(), forKey: Self.selectedAppsStorageKey)
+    self.defaults.set(Self.configurationVersion, forKey: Self.configurationVersionKey)
+    self.defaults.set(self.alwaysDisplay, forKey: Self.alwaysStorageKey)
+    self.defaults.set(Array(self.selectedApps).sorted(), forKey: Self.selectedAppsStorageKey)
   }
 }
 
@@ -190,6 +190,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
       kimiAPIKeyStore: self.credentialPreferences.kimiAPIKeyStore))
   private let displayPreferences = DisplayPreferences()
   private let contentPreferences = ContentPreferences()
+  private var statusBarController: StatusBarQuotaController?
   private var panel: NSPanel?
   private var displayModeObserver: AnyCancellable?
   private var contentModeObserver: AnyCancellable?
@@ -216,45 +217,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     NSApplication.shared.setActivationPolicy(.accessory)
-
-    let panel = NSPanel(
-      contentRect: NSRect(x: 0, y: 0, width: 567, height: 40),
-      styleMask: [.borderless, .resizable, .nonactivatingPanel],
-      backing: .buffered,
-      defer: false)
-    panel.title = "QuotaFloat"
-    panel.titleVisibility = .hidden
-    panel.titlebarAppearsTransparent = true
-    panel.isOpaque = false
-    panel.backgroundColor = .clear
-    panel.hasShadow = false
-    panel.level = .floating
-    panel.hidesOnDeactivate = false
-    panel.isMovableByWindowBackground = true
-    panel.isReleasedWhenClosed = false
-    panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-    panel.contentAspectRatio = self.contentPreferences.designSize
-    panel.contentMinSize = self.contentPreferences.minimumSize
-    panel.minSize = self.contentPreferences.minimumSize
-    panel.contentMaxSize = NSSize(width: 5670, height: 400)
-    panel.maxSize = NSSize(width: 5670, height: 400)
-    panel.delegate = self
-    panel.contentView = NSHostingView(
-      rootView: FloatingQuotaView(
-        store: self.store,
-        displayPreferences: self.displayPreferences,
-        contentPreferences: self.contentPreferences,
-        credentialPreferences: self.credentialPreferences))
-    panel.setFrameAutosaveName("QuotaFloatProportional557")
-
-    if !panel.setFrameUsingName("QuotaFloatProportional557") {
-      self.positionAtTopRight(panel)
-    }
-    self.enforceAllowedSize(panel)
-
-    self.panel = panel
-    self.startApplicationVisibilityTracking()
-    self.updatePanelVisibility()
+    self.contentPreferences.setSelectedProviders([.codex])
+    self.store.setActiveProviders([.codex])
+    self.statusBarController = StatusBarQuotaController(store: self.store)
     self.store.start()
   }
 
