@@ -1,12 +1,11 @@
 import Foundation
 
-struct CodexAuthFileFingerprint: Equatable, Sendable {
-  let modifiedAt: Date
-  let fileSize: UInt64
-  let fileIdentifier: UInt64?
+struct CodexAuthIdentity: Equatable, Sendable {
+  let accountID: String?
+  let email: String?
 }
 
-struct CodexAuthFingerprintReader {
+struct CodexAuthIdentityReader {
   let fileURL: URL
   private let fileManager: FileManager
 
@@ -18,20 +17,28 @@ struct CodexAuthFingerprintReader {
     self.fileManager = fileManager
   }
 
-  func read() -> CodexAuthFileFingerprint? {
+  func read() -> CodexAuthIdentity? {
     guard
-      let attributes = try? self.fileManager.attributesOfItem(atPath: self.fileURL.path),
-      let modifiedAt = attributes[.modificationDate] as? Date,
-      let fileSize = attributes[.size] as? NSNumber
+      let data = try? Data(contentsOf: self.fileURL)
     else {
       return nil
     }
 
-    let identifier = attributes[.systemFileNumber] as? NSNumber
-    return CodexAuthFileFingerprint(
-      modifiedAt: modifiedAt,
-      fileSize: fileSize.uint64Value,
-      fileIdentifier: identifier?.uint64Value)
+    return Self.identity(from: data)
+  }
+
+  static func identity(from data: Data) -> CodexAuthIdentity? {
+    guard
+      let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+      let tokens = root["tokens"] as? [String: Any]
+    else {
+      return nil
+    }
+
+    let accountID = Self.trimmedString(tokens["account_id"] ?? tokens["accountId"])
+    let email = Self.email(fromIDToken: Self.trimmedString(tokens["id_token"] ?? tokens["idToken"]))
+    guard accountID != nil || email != nil else { return nil }
+    return CodexAuthIdentity(accountID: accountID, email: email)
   }
 
   static func defaultAuthFileURL(environment: [String: String] = ProcessInfo.processInfo.environment) -> URL {
@@ -43,18 +50,44 @@ struct CodexAuthFingerprintReader {
       .appendingPathComponent(".codex", isDirectory: true)
       .appendingPathComponent("auth.json", isDirectory: false)
   }
+
+  private static func trimmedString(_ value: Any?) -> String? {
+    guard let string = value as? String else { return nil }
+    let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? nil : trimmed
+  }
+
+  private static func email(fromIDToken idToken: String?) -> String? {
+    guard let idToken else { return nil }
+    let parts = idToken.split(separator: ".")
+    guard parts.count >= 2 else { return nil }
+
+    var payload = String(parts[1])
+      .replacingOccurrences(of: "-", with: "+")
+      .replacingOccurrences(of: "_", with: "/")
+    let padding = (4 - payload.count % 4) % 4
+    payload.append(String(repeating: "=", count: padding))
+
+    guard
+      let data = Data(base64Encoded: payload),
+      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    else {
+      return nil
+    }
+    return Self.trimmedString(json["email"])
+  }
 }
 
 @MainActor
 final class CodexAuthMonitor {
-  private let reader: CodexAuthFingerprintReader
+  private let reader: CodexAuthIdentityReader
   private let interval: TimeInterval
   private let onChange: @MainActor () -> Void
-  private var lastFingerprint: CodexAuthFileFingerprint?
+  private var lastIdentity: CodexAuthIdentity?
   private var timer: Timer?
 
   init(
-    reader: CodexAuthFingerprintReader = CodexAuthFingerprintReader(),
+    reader: CodexAuthIdentityReader = CodexAuthIdentityReader(),
     interval: TimeInterval = 5,
     onChange: @escaping @MainActor () -> Void
   ) {
@@ -65,7 +98,7 @@ final class CodexAuthMonitor {
 
   func start() {
     guard self.timer == nil else { return }
-    self.lastFingerprint = self.reader.read()
+    self.lastIdentity = self.reader.read()
     self.timer = Timer.scheduledTimer(withTimeInterval: self.interval, repeats: true) {
       [weak self] _ in
       Task { @MainActor [weak self] in
@@ -80,10 +113,13 @@ final class CodexAuthMonitor {
   }
 
   func poll() {
-    let fingerprint = self.reader.read()
-    defer { self.lastFingerprint = fingerprint }
-    guard let lastFingerprint, let fingerprint else { return }
-    guard fingerprint != lastFingerprint else { return }
+    guard let identity = self.reader.read() else { return }
+    defer { self.lastIdentity = identity }
+    guard let lastIdentity else {
+      self.onChange()
+      return
+    }
+    guard identity != lastIdentity else { return }
     self.onChange()
   }
 }
