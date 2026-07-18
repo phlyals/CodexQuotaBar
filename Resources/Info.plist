@@ -9,15 +9,17 @@
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
-    <string>local.channoey.quotafloat</string>
+    <string>local.channoey.codexquotabar</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
+    <key>CFBundleDisplayName</key>
+    <string>CodexQuotaBar</string>
     <key>CFBundleName</key>
-    <string>QuotaFloat</string>
+    <string>CodexQuotaBar</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>0.1.3</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSMinimumSystemVersion</key>
@@ -27,6 +29,6 @@
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSHumanReadableCopyright</key>
-    <string>QuotaFloat © 2026 Hejs26. Includes CodexBarCore © 2026 Peter Steinberger.</string>
+    <string>CodexQuotaBar © 2026. Based on QuotaFloat © 2026 Hejs26 and CodexBarCore © 2026 Peter Steinberger.</string>
 </dict>
 </plist>

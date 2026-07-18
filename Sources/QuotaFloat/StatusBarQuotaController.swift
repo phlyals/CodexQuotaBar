@@ -79,12 +79,14 @@ enum StatusBarQuotaFormatter {
 @MainActor
 final class StatusBarQuotaController: NSObject {
   private let store: QuotaStore
+  private let launchAtLoginController: LaunchAtLoginController
   private let statusItem: NSStatusItem
   private let statusView = StatusBarQuotaView()
   private var cancellables: Set<AnyCancellable> = []
 
-  init(store: QuotaStore) {
+  init(store: QuotaStore, launchAtLoginController: LaunchAtLoginController = LaunchAtLoginController()) {
     self.store = store
+    self.launchAtLoginController = launchAtLoginController
     self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     super.init()
     self.configureButton()
@@ -145,8 +147,18 @@ final class StatusBarQuotaController: NSObject {
     refreshItem.isEnabled = !self.store.isRefreshing
     menu.addItem(refreshItem)
 
+    let loginItem = NSMenuItem(
+      title: "开机自启动",
+      action: #selector(self.toggleLaunchAtLogin),
+      keyEquivalent: "")
+    loginItem.target = self
+    loginItem.state = self.launchAtLoginController.isEnabled ? .on : .off
+    menu.addItem(loginItem)
+
+    menu.addItem(.separator())
+
     let quitItem = NSMenuItem(
-      title: "退出 QuotaFloat",
+      title: "退出 CodexQuotaBar",
       action: #selector(self.quit),
       keyEquivalent: "q")
     quitItem.target = self
@@ -158,6 +170,24 @@ final class StatusBarQuotaController: NSObject {
   @objc private func refresh() {
     self.store.refresh()
     self.update()
+  }
+
+  @objc private func toggleLaunchAtLogin() {
+    do {
+      _ = try self.launchAtLoginController.toggle()
+      self.update()
+    } catch {
+      self.showLaunchAtLoginError(error)
+    }
+  }
+
+  private func showLaunchAtLoginError(_ error: Error) {
+    let alert = NSAlert()
+    alert.messageText = "无法更新开机自启动"
+    alert.informativeText = "请先把 CodexQuotaBar.app 放入“应用程序”文件夹，然后再打开菜单重试。\n\n\(error.localizedDescription)"
+    alert.alertStyle = .warning
+    alert.addButton(withTitle: "好")
+    alert.runModal()
   }
 
   @objc private func quit() {
