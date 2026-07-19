@@ -13,9 +13,9 @@
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleDisplayName</key>
-    <string>CodexQuotaBar</string>
+    <string>codex额度显示器</string>
     <key>CFBundleName</key>
-    <string>CodexQuotaBar</string>
+    <string>codex额度显示器</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -29,6 +29,6 @@
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSHumanReadableCopyright</key>
-    <string>CodexQuotaBar © 2026. Based on QuotaFloat © 2026 Hejs26 and CodexBarCore © 2026 Peter Steinberger.</string>
+    <string>codex额度显示器 © 2026. Based on QuotaFloat © 2026 Hejs26 and CodexBarCore © 2026 Peter Steinberger.</string>
 </dict>
 </plist>

@@ -158,7 +158,7 @@ final class StatusBarQuotaController: NSObject {
     menu.addItem(.separator())
 
     let quitItem = NSMenuItem(
-      title: "退出 CodexQuotaBar",
+      title: "退出 codex额度显示器",
       action: #selector(self.quit),
       keyEquivalent: "q")
     quitItem.target = self
@@ -184,7 +184,7 @@ final class StatusBarQuotaController: NSObject {
   private func showLaunchAtLoginError(_ error: Error) {
     let alert = NSAlert()
     alert.messageText = "无法更新开机自启动"
-    alert.informativeText = "请先把 CodexQuotaBar.app 放入“应用程序”文件夹，然后再打开菜单重试。\n\n\(error.localizedDescription)"
+    alert.informativeText = "请先把 codex额度显示器.app 放入“应用程序”文件夹，然后再打开菜单重试。\n\n\(error.localizedDescription)"
     alert.alertStyle = .warning
     alert.addButton(withTitle: "好")
     alert.runModal()

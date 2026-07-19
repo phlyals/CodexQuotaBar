@@ -6,10 +6,11 @@ cd "$ROOT"
 
 swift build -c release --product QuotaFloat
 BIN_DIR="$(swift build -c release --show-bin-path)"
-APP="$ROOT/dist/CodexQuotaBar.app"
+APP="$ROOT/dist/codex额度显示器.app"
 
 rm -rf "$APP"
 rm -rf "$ROOT/dist/QuotaFloat.app"
+rm -rf "$ROOT/dist/CodexQuotaBar.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_DIR/QuotaFloat" "$APP/Contents/MacOS/QuotaFloat"
 cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
