@@ -10,7 +10,6 @@ struct FloatingQuotaView: View {
   @ObservedObject var store: QuotaStore
   @ObservedObject var displayPreferences: DisplayPreferences
   @ObservedObject var contentPreferences: ContentPreferences
-  @ObservedObject var credentialPreferences: ProviderCredentialPreferences
   @State private var isHovering = false
   @State private var isShowingManualRefreshFeedback = false
 
@@ -114,15 +113,6 @@ struct FloatingQuotaView: View {
       }
 
       Button {
-        self.displayPreferences.toggleApp("com.anthropic.claudefordesktop")
-      } label: {
-        Label(
-          "仅在 Claude 中显示",
-          systemImage: self.displayPreferences.isEnabled("com.anthropic.claudefordesktop")
-            ? "checkmark" : "")
-      }
-
-      Button {
         self.displayPreferences.toggleTerminals()
       } label: {
         Label(
@@ -139,66 +129,6 @@ struct FloatingQuotaView: View {
       }
     }
 
-    Section("显示内容") {
-      Button {
-        self.contentPreferences.selectAll()
-      } label: {
-        Label(
-          "全部显示",
-          systemImage: self.contentPreferences.selectedProviders
-            == Set(QuotaProviderCatalog.orderedProviders) ? "checkmark" : "")
-      }
-
-      ForEach(QuotaProviderCatalog.orderedProviders) { provider in
-        Button {
-          self.toggleProvider(provider)
-        } label: {
-          Label(
-            provider.displayName,
-            systemImage: self.contentPreferences.selectedProviders.contains(provider)
-              ? "checkmark" : "")
-        }
-      }
-    }
-
-    Section("服务设置") {
-      Button {
-        if self.credentialPreferences.promptForKimiAPIKey() {
-          if !self.contentPreferences.selectedProviders.contains(.kimi) {
-            self.contentPreferences.toggle(.kimi)
-          } else {
-            self.store.refresh()
-          }
-        }
-      } label: {
-        Label(
-          self.credentialPreferences.hasKimiAPIKey
-            ? "更新 Kimi API Key…" : "设置 Kimi API Key…",
-          systemImage: "key")
-      }
-
-      if self.credentialPreferences.hasKimiAPIKey {
-        Button {
-          if self.credentialPreferences.confirmAndClearKimiAPIKey() {
-            self.store.refresh()
-          }
-        } label: {
-          Label("清除 Kimi API Key", systemImage: "trash")
-        }
-      }
-    }
-  }
-
-  private func toggleProvider(_ provider: QuotaProvider) {
-    let isEnabling = !self.contentPreferences.selectedProviders.contains(provider)
-    if isEnabling,
-      provider.definition.credential == .kimiCodingPlanAPIKey,
-      !self.credentialPreferences.hasKimiAPIKey,
-      !self.credentialPreferences.promptForKimiAPIKey()
-    {
-      return
-    }
-    self.contentPreferences.toggle(provider)
   }
 
   private var providerContent: some View {
@@ -209,52 +139,7 @@ struct FloatingQuotaView: View {
 
   @ViewBuilder
   private var providerContentForMode: some View {
-    let providers = self.contentPreferences.orderedSelectedProviders
-    if providers.count == 1, let provider = providers.first {
-      self.singleProviderContent(provider)
-    } else {
-      HStack(spacing: 14) {
-        ForEach(Array(providers.enumerated()), id: \.element) { index, provider in
-          if index > 0 {
-            Rectangle()
-              .fill(Color.black.opacity(0.08))
-              .frame(width: 1, height: 21)
-          }
-
-          self.multiProviderContent(provider)
-        }
-      }
-    }
-  }
-
-  @ViewBuilder
-  private func multiProviderContent(_ provider: QuotaProvider) -> some View {
-    let snapshot = self.store.snapshot(for: provider)
-    if self.contentPreferences.multiResetPinned {
-      HStack(spacing: 14) {
-        ProviderStrip(
-          provider: provider,
-          snapshot: snapshot,
-          showsResetOnHover: false,
-          onPinReset: nil)
-
-        ResetHoverSummary(
-          session: snapshot?.session,
-          weekly: snapshot?.weekly,
-          width: 110,
-          onHide: {
-            self.contentPreferences.setMultiResetPinned(false)
-          })
-      }
-    } else {
-      ProviderStrip(
-        provider: provider,
-        snapshot: snapshot,
-        showsResetOnHover: true,
-        onPinReset: {
-          self.contentPreferences.setMultiResetPinned(true)
-        })
-    }
+    self.singleProviderContent(.codex)
   }
 
   @ViewBuilder
@@ -309,7 +194,8 @@ struct FloatingQuotaView: View {
         Image(systemName: "arrow.clockwise")
           .rotationEffect(
             self.store.isRefreshing || self.isShowingManualRefreshFeedback
-              ? .degrees(360) : .zero)
+              ? .degrees(360) : .zero
+          )
           .animation(
             self.store.isRefreshing || self.isShowingManualRefreshFeedback
               ? .linear(duration: 0.9).repeatForever(autoreverses: false)
@@ -347,7 +233,8 @@ private struct ProviderStrip: View {
         {
           ResetCreditsHoverSummary(
             resetCredits: resetCredits,
-            width: 191)
+            width: 191
+          )
           .transition(.opacity)
         } else if self.showsResetOnHover && self.isHoveringMetrics {
           ResetHoverSummary(
@@ -469,7 +356,8 @@ private struct ResetHoverSummary: View {
             .frame(height: 20)
             .background(
               Color.white.opacity(0.9),
-              in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+              in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+            )
             .overlay {
               RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .stroke(Color.black.opacity(0.14), lineWidth: 0.8)
@@ -624,13 +512,15 @@ private struct ResetLoopIcon: View {
       let wingLength = min(size.width, size.height) * 0.19
       let wingSpread = min(size.width, size.height) * 0.13
       var arrow = Path()
-      arrow.move(to: CGPoint(
-        x: tip.x - tangent.dx * wingLength + radial.dx * wingSpread,
-        y: tip.y - tangent.dy * wingLength + radial.dy * wingSpread))
+      arrow.move(
+        to: CGPoint(
+          x: tip.x - tangent.dx * wingLength + radial.dx * wingSpread,
+          y: tip.y - tangent.dy * wingLength + radial.dy * wingSpread))
       arrow.addLine(to: tip)
-      arrow.addLine(to: CGPoint(
-        x: tip.x - tangent.dx * wingLength - radial.dx * wingSpread,
-        y: tip.y - tangent.dy * wingLength - radial.dy * wingSpread))
+      arrow.addLine(
+        to: CGPoint(
+          x: tip.x - tangent.dx * wingLength - radial.dx * wingSpread,
+          y: tip.y - tangent.dy * wingLength - radial.dy * wingSpread))
       context.stroke(
         arrow,
         with: .foreground,
@@ -695,10 +585,6 @@ private struct ProviderMark: View {
         switch self.provider.definition.icon {
         case .codex:
           CodexMark()
-        case .claude:
-          ClaudeMark()
-        case .kimi:
-          KimiMark()
         }
       }
       .frame(width: 24, height: 24)
@@ -792,55 +678,6 @@ private struct CodexMark: View {
       }
       .shadow(color: Color.black.opacity(0.04), radius: 1, y: 1)
   }
-}
-
-private struct ClaudeMark: View {
-  var body: some View {
-    Image(nsImage: Self.image)
-      .resizable()
-      .interpolation(.high)
-      .antialiased(true)
-      .aspectRatio(contentMode: .fit)
-  }
-
-  private static let image: NSImage = {
-    guard let url = Bundle.module.url(forResource: "claude-mark", withExtension: "svg"),
-      let image = NSImage(contentsOf: url)
-    else {
-      return NSImage(size: NSSize(width: 24, height: 24))
-    }
-    return image
-  }()
-}
-
-private struct KimiMark: View {
-  var body: some View {
-    RoundedRectangle(cornerRadius: 6, style: .continuous)
-      .fill(Color.white)
-      .overlay {
-        Image(nsImage: Self.image)
-          .resizable()
-          .renderingMode(.template)
-          .foregroundStyle(Color.black.opacity(0.82))
-          .aspectRatio(contentMode: .fit)
-          .padding(4)
-      }
-      .overlay {
-        RoundedRectangle(cornerRadius: 6, style: .continuous)
-          .stroke(Color.black.opacity(0.06), lineWidth: 1)
-      }
-      .shadow(color: Color.black.opacity(0.04), radius: 1, y: 1)
-  }
-
-  private static let image: NSImage = {
-    guard let url = Bundle.module.url(forResource: "kimi-mark", withExtension: "svg"),
-      let image = NSImage(contentsOf: url)
-    else {
-      return NSImage(size: NSSize(width: 24, height: 24))
-    }
-    image.isTemplate = true
-    return image
-  }()
 }
 
 private struct StripButtonStyle: ButtonStyle {

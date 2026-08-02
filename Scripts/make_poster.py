@@ -75,7 +75,7 @@ y += 130
 cx = W // S // 2
 
 dot_y = y + 8
-text((cx, dot_y), "Codex  ·  Claude  ·  Kimi", F_SECTION, fill=INK, anchor="mm")
+text((cx, dot_y), "Codex 多账号 · 额度同步", F_SECTION, fill=INK, anchor="mm")
 line(PAD_X, y + 36, cx - 130, y + 36, LINE, 1)
 line(cx + 130, y + 36, W // S - PAD_X, y + 36, LINE, 1)
 
@@ -206,8 +206,8 @@ def icon_native(cx0, cy0):
     circle(cx0 - 10, cy0 - 13, 1.5, fill=BG)
 
 cards = [
-    ("一行胶囊置顶", "Codex、Claude、Kimi 多家额度\n原生 macOS · 置顶 · 记住位置", icon_capsule_native),
-    ("按需显隐", "只在 Codex、Claude、终端等\n指定应用里现身,不抢屏幕", icon_visibility),
+    ("额度账号同步", "切换 Codex 账号后同步额度\n原生 macOS · 安全原子替换", icon_capsule_native),
+    ("按需显隐", "只在 Codex、终端等\n指定应用里现身,不抢屏幕", icon_visibility),
     ("双周期 + 倒计时", "5 小时窗口与周窗口分别\n显示已用百分比和重置时间", icon_dual_window),
     ("智能配速评估", "比对剩余时间和剩余额度\n标出宽裕 / 正常 / 偏快 / 告急", icon_gauge),
     ("内容密度可选", "完整 / 迷你 / 单档 三档显示\n按需选择要展示哪几项", icon_density),

@@ -1,0 +1,171 @@
+import CodexBarCore
+import Foundation
+
+struct CodexLocalUsageSnapshot: Codable, Equatable, Sendable {
+  struct DailyEntry: Codable, Equatable, Identifiable, Sendable {
+    struct ModelBreakdown: Codable, Equatable, Sendable {
+      let modelName: String
+      let cost: Double?
+      let totalTokens: Int?
+    }
+
+    let date: String
+    let inputTokens: Int?
+    let outputTokens: Int?
+    let cacheReadTokens: Int?
+    let cacheCreationTokens: Int?
+    let totalTokens: Int?
+    let totalCost: Double?
+    let modelsUsed: [String]?
+    let modelBreakdowns: [ModelBreakdown]?
+
+    var id: String { self.date }
+  }
+
+  let provider: String
+  let source: String
+  let updatedAt: Date?
+  let currencyCode: String?
+  let sessionTokens: Int?
+  let sessionCostUSD: Double?
+  let historyDays: Int?
+  let last30DaysTokens: Int?
+  let last30DaysCostUSD: Double?
+  let daily: [DailyEntry]
+
+  var topModel: String? {
+    var scores: [String: (cost: Double, tokens: Int)] = [:]
+    for entry in self.daily {
+      if let breakdowns = entry.modelBreakdowns {
+        for breakdown in breakdowns {
+          var score = scores[breakdown.modelName] ?? (0, 0)
+          score.cost += breakdown.cost ?? 0
+          score.tokens += breakdown.totalTokens ?? 0
+          scores[breakdown.modelName] = score
+        }
+      } else {
+        for model in entry.modelsUsed ?? [] {
+          var score = scores[model] ?? (0, 0)
+          score.tokens += entry.totalTokens ?? 0
+          scores[model] = score
+        }
+      }
+    }
+    return scores.max { lhs, rhs in
+      lhs.value.cost == rhs.value.cost
+        ? lhs.value.tokens < rhs.value.tokens
+        : lhs.value.cost < rhs.value.cost
+    }?.key
+  }
+}
+
+protocol CodexLocalUsageFetching: Sendable {
+  func fetch(forceRefresh: Bool) async throws -> CodexLocalUsageSnapshot
+}
+
+struct CodexCostHelper: CodexLocalUsageFetching {
+  private struct ErrorPayload: Decodable {
+    let message: String?
+  }
+
+  private struct Payload: Decodable {
+    let provider: String
+    let source: String
+    let updatedAt: Date?
+    let currencyCode: String?
+    let sessionTokens: Int?
+    let sessionCostUSD: Double?
+    let historyDays: Int?
+    let last30DaysTokens: Int?
+    let last30DaysCostUSD: Double?
+    let daily: [CodexLocalUsageSnapshot.DailyEntry]
+    let error: ErrorPayload?
+  }
+
+  enum HelperError: LocalizedError {
+    case missingHelper
+    case missingPayload
+    case providerError(String)
+
+    var errorDescription: String? {
+      switch self {
+      case .missingHelper: "应用包缺少 CodexBarCLI 用量 helper。"
+      case .missingPayload: "CodexBarCLI 没有返回 Codex 用量。"
+      case .providerError(let message): message
+      }
+    }
+  }
+
+  private let helperURL: URL?
+  private let environment: [String: String]
+
+  init(
+    helperURL: URL? = CodexCostHelper.defaultHelperURL(),
+    environment: [String: String] = ProcessInfo.processInfo.environment
+  ) {
+    self.helperURL = helperURL
+    self.environment = environment
+  }
+
+  func fetch(forceRefresh: Bool) async throws -> CodexLocalUsageSnapshot {
+    guard let helperURL else { throw HelperError.missingHelper }
+    var arguments = ["cost", "--provider", "codex", "--format", "json", "--json-only"]
+    if forceRefresh { arguments.append("--refresh") }
+    var helperEnvironment = self.environment
+    // Keep the helper independent from a separately installed CodexBar's config. Older CodexBar
+    // config schemas must not prevent QuotaFloat from reading the local Codex session logs.
+    helperEnvironment["CODEXBAR_CONFIG"] = Self.isolatedConfigURL().path
+    let result = try await SubprocessRunner.run(
+      binary: helperURL.path,
+      arguments: arguments,
+      environment: helperEnvironment,
+      timeout: 45,
+      label: "codex-local-cost")
+    return try Self.decode(result.stdout)
+  }
+
+  static func decode(_ json: String) throws -> CodexLocalUsageSnapshot {
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    let payloads = try decoder.decode([Payload].self, from: Data(json.utf8))
+    guard let payload = payloads.first(where: { $0.provider == "codex" }) else {
+      throw HelperError.missingPayload
+    }
+    if let error = payload.error {
+      throw HelperError.providerError(error.message ?? "Codex 本机用量读取失败。")
+    }
+    return CodexLocalUsageSnapshot(
+      provider: payload.provider,
+      source: payload.source,
+      updatedAt: payload.updatedAt,
+      currencyCode: payload.currencyCode,
+      sessionTokens: payload.sessionTokens,
+      sessionCostUSD: payload.sessionCostUSD,
+      historyDays: payload.historyDays,
+      last30DaysTokens: payload.last30DaysTokens,
+      last30DaysCostUSD: payload.last30DaysCostUSD,
+      daily: payload.daily)
+  }
+
+  private static func defaultHelperURL(bundle: Bundle = .main) -> URL? {
+    let bundled = bundle.bundleURL.appendingPathComponent(
+      "Contents/Helpers/CodexBarCLI", isDirectory: false)
+    if FileManager.default.isExecutableFile(atPath: bundled.path) { return bundled }
+    if let override = ProcessInfo.processInfo.environment["QUOTAFLOAT_CODEXBAR_CLI"],
+      FileManager.default.isExecutableFile(atPath: override)
+    {
+      return URL(fileURLWithPath: override)
+    }
+    return nil
+  }
+
+  private static func isolatedConfigURL() -> URL {
+    let support =
+      FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+      .first ?? FileManager.default.temporaryDirectory
+    return
+      support
+      .appendingPathComponent("QuotaFloat", isDirectory: true)
+      .appendingPathComponent("CodexBarCLI-config.json", isDirectory: false)
+  }
+}

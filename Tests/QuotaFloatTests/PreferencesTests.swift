@@ -1,4 +1,5 @@
 import XCTest
+
 @testable import QuotaFloat
 
 @MainActor
@@ -19,7 +20,7 @@ final class PreferencesTests: XCTestCase {
     XCTAssertFalse(preferences.alwaysDisplay)
     XCTAssertEqual(
       preferences.selectedApps,
-      ["com.openai.codex", "com.anthropic.claudefordesktop"])
+      ["com.openai.codex"])
   }
 
   func testVersionUpgradePreservesExistingSelection() {
@@ -34,73 +35,4 @@ final class PreferencesTests: XCTestCase {
     XCTAssertEqual(preferences.selectedApps, ["com.apple.Terminal"])
   }
 
-  func testKimiCredentialPreferencesUseInjectedStore() throws {
-    let store = MemoryKimiAPIKeyStore()
-    try store.save("key-from-test")
-
-    let preferences = ProviderCredentialPreferences(kimiAPIKeyStore: store)
-
-    XCTAssertTrue(preferences.hasKimiAPIKey)
-  }
-
-  func testSecureKimiStoreMigratesExistingFileValueIntoKeychain() throws {
-    let fileStore = KimiAPIKeyStore(fileURL: self.makeTemporaryKeyURL())
-    try fileStore.save("file-key")
-    let keychain = MemoryKeychainPasswordStore()
-    let secureStore = SecureKimiAPIKeyStore(keychain: keychain, fileFallback: fileStore)
-
-    XCTAssertEqual(secureStore.load(), "file-key")
-    XCTAssertEqual(keychain.value, "file-key")
-  }
-
-  func testSecureKimiStoreClearRemovesKeychainAndFallbackFile() throws {
-    let fileStore = KimiAPIKeyStore(fileURL: self.makeTemporaryKeyURL())
-    try fileStore.save("file-key")
-    let keychain = MemoryKeychainPasswordStore()
-    try keychain.save("keychain-key")
-    let secureStore = SecureKimiAPIKeyStore(keychain: keychain, fileFallback: fileStore)
-
-    try secureStore.clear()
-
-    XCTAssertNil(keychain.value)
-    XCTAssertNil(fileStore.load())
-  }
-
-  private func makeTemporaryKeyURL() -> URL {
-    FileManager.default.temporaryDirectory
-      .appendingPathComponent("QuotaFloatTests-\(UUID().uuidString)", isDirectory: true)
-      .appendingPathComponent("kimi-api-key", isDirectory: false)
-  }
-}
-
-private final class MemoryKimiAPIKeyStore: KimiAPIKeyStoring, @unchecked Sendable {
-  private var value: String?
-
-  func load() -> String? {
-    self.value
-  }
-
-  func save(_ apiKey: String) throws {
-    self.value = apiKey
-  }
-
-  func clear() throws {
-    self.value = nil
-  }
-}
-
-private final class MemoryKeychainPasswordStore: KeychainPasswordStoring, @unchecked Sendable {
-  var value: String?
-
-  func load() throws -> String? {
-    self.value
-  }
-
-  func save(_ value: String) throws {
-    self.value = value
-  }
-
-  func clear() throws {
-    self.value = nil
-  }
 }

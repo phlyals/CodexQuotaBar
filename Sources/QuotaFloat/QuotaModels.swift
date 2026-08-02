@@ -2,8 +2,6 @@ import Foundation
 
 enum QuotaProvider: String, Codable, CaseIterable, Identifiable, Sendable {
   case codex
-  case claude
-  case kimi
 
   var id: String { self.rawValue }
 
@@ -109,6 +107,7 @@ struct QuotaSnapshot: Codable, Equatable, Identifiable, Sendable {
   let weekly: QuotaWindow?
   let resetCredits: QuotaResetCredits?
   let accountEmail: String?
+  let accountPlan: String?
   let source: String
   let updatedAt: Date
   let freshness: QuotaFreshness
@@ -118,6 +117,30 @@ struct QuotaSnapshot: Codable, Equatable, Identifiable, Sendable {
 
   var hasQuotaData: Bool {
     self.session != nil || self.weekly != nil
+  }
+
+  init(
+    provider: QuotaProvider,
+    session: QuotaWindow?,
+    weekly: QuotaWindow?,
+    resetCredits: QuotaResetCredits?,
+    accountEmail: String?,
+    accountPlan: String? = nil,
+    source: String,
+    updatedAt: Date,
+    freshness: QuotaFreshness,
+    message: String?
+  ) {
+    self.provider = provider
+    self.session = session
+    self.weekly = weekly
+    self.resetCredits = resetCredits
+    self.accountEmail = accountEmail
+    self.accountPlan = accountPlan
+    self.source = source
+    self.updatedAt = updatedAt
+    self.freshness = freshness
+    self.message = message
   }
 
   func markingCached(now: Date = Date(), staleAfter: TimeInterval) -> QuotaSnapshot {
@@ -145,6 +168,7 @@ struct QuotaSnapshot: Codable, Equatable, Identifiable, Sendable {
       weekly: self.weekly,
       resetCredits: self.resetCredits,
       accountEmail: self.accountEmail,
+      accountPlan: self.accountPlan,
       source: self.source,
       updatedAt: self.updatedAt,
       freshness: freshness,

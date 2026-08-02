@@ -21,11 +21,8 @@ let package = Package(
         .product(name: "CodexBarCore", package: "CodexBar")
       ],
       path: "Sources/QuotaFloat",
-      resources: [
-        .copy("Resources/claude-mark.svg"),
-        .copy("Resources/kimi-mark.svg")
-      ]),
+      resources: []),
     .testTarget(
       name: "QuotaFloatTests",
-      dependencies: ["QuotaFloat"])
+      dependencies: ["QuotaFloat"]),
   ])

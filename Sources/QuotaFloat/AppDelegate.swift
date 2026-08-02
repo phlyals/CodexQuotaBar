@@ -34,7 +34,7 @@ final class DisplayPreferences: ObservableObject {
       self.selectedApps =
         shouldAlwaysDisplay
         ? []
-        : ["com.openai.codex", "com.anthropic.claudefordesktop"]
+        : ["com.openai.codex"]
       self.save()
     }
 
@@ -86,9 +86,7 @@ final class DisplayPreferences: ObservableObject {
 
 @MainActor
 final class ContentPreferences: ObservableObject {
-  @Published private(set) var selectedProviders = Set(QuotaProviderCatalog.orderedProviders)
   @Published private(set) var singleResetPinned = true
-  @Published private(set) var multiResetPinned = false
   @Published private(set) var isCollapsed = false
 
   private static let providerStripWidth: CGFloat = 224
@@ -101,19 +99,13 @@ final class ContentPreferences: ObservableObject {
       return NSSize(width: Self.collapsedWidth, height: 40)
     }
 
-    let providerCount = max(1, self.selectedProviders.count)
-    let providerWidth = Self.providerStripWidth
-      + ((providerCount == 1 ? self.singleResetPinned : self.multiResetPinned)
+    let providerWidth =
+      Self.providerStripWidth
+      + (self.singleResetPinned
         ? 14 + Self.pinnedResetWidth
         : 0)
-    let contentWidth: CGFloat = if providerCount == 1 {
-      providerWidth
-    } else {
-      CGFloat(providerCount) * providerWidth
-        + CGFloat(providerCount - 1) * Self.providerSeparatorWidth
-    }
     return NSSize(
-      width: contentWidth + PanelMargins.left + PanelMargins.right,
+      width: providerWidth + PanelMargins.left + PanelMargins.right,
       height: 40)
   }
 
@@ -127,34 +119,19 @@ final class ContentPreferences: ObservableObject {
   }
 
   var activeProviders: Set<QuotaProvider> {
-    self.isCollapsed ? [] : self.selectedProviders
+    self.isCollapsed ? [] : [.codex]
   }
 
   var orderedSelectedProviders: [QuotaProvider] {
-    QuotaProviderCatalog.orderedProviders.filter(self.selectedProviders.contains)
+    [.codex]
   }
 
   var selectionKey: String {
-    if self.selectedProviders == Set(QuotaProviderCatalog.orderedProviders) { return "all" }
-    return self.orderedSelectedProviders.map(\.rawValue).joined(separator: "+")
+    "codex"
   }
 
   func setSelectedProviders(_ providers: Set<QuotaProvider>) {
-    let available = providers.intersection(Set(QuotaProviderCatalog.orderedProviders))
-    self.selectedProviders = available.isEmpty ? [QuotaProviderCatalog.orderedProviders[0]] : available
-  }
-
-  func selectAll() {
-    self.selectedProviders = Set(QuotaProviderCatalog.orderedProviders)
-  }
-
-  func toggle(_ provider: QuotaProvider) {
-    if self.selectedProviders.contains(provider) {
-      guard self.selectedProviders.count > 1 else { return }
-      self.selectedProviders.remove(provider)
-    } else {
-      self.selectedProviders.insert(provider)
-    }
+    _ = providers
   }
 
   func collapse() {
@@ -162,7 +139,6 @@ final class ContentPreferences: ObservableObject {
   }
 
   func expandAll() {
-    self.selectAll()
     self.isCollapsed = false
   }
 
@@ -170,24 +146,18 @@ final class ContentPreferences: ObservableObject {
     self.singleResetPinned = pinned
   }
 
-  func setMultiResetPinned(_ pinned: Bool) {
-    self.multiResetPinned = pinned
-  }
 }
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
   private static let supportedBundleIdentifiers = [
     "com.openai.codex",
-    "com.anthropic.claudefordesktop",
     "com.googlecode.iterm2",
     "com.apple.Terminal",
   ]
 
-  private let credentialPreferences = ProviderCredentialPreferences()
-  private lazy var store = QuotaStore(
-    fetcher: CodexBarQuotaFetcher(
-      kimiAPIKeyStore: self.credentialPreferences.kimiAPIKeyStore))
+  private let store = QuotaStore(fetcher: CodexBarQuotaFetcher())
+  private let accountManager = CodexAccountManager()
   private let displayPreferences = DisplayPreferences()
   private let contentPreferences = ContentPreferences()
   private var statusBarController: StatusBarQuotaController?
@@ -220,7 +190,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     NSApplication.shared.setActivationPolicy(.accessory)
     self.contentPreferences.setSelectedProviders([.codex])
     self.store.setActiveProviders([.codex])
-    self.statusBarController = StatusBarQuotaController(store: self.store)
+    self.statusBarController = StatusBarQuotaController(
+      store: self.store,
+      accountManager: self.accountManager)
     self.codexAuthMonitor = CodexAuthMonitor { [weak self] in
       Task { @MainActor [weak self] in
         self?.store.invalidateAndRefresh(.codex)
@@ -336,17 +308,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
       }
     }
 
-    self.contentModeObserver = Publishers.CombineLatest4(
-      self.contentPreferences.$selectedProviders,
+    self.contentModeObserver = Publishers.CombineLatest(
       self.contentPreferences.$singleResetPinned,
-      self.contentPreferences.$multiResetPinned,
       self.contentPreferences.$isCollapsed
     )
     .removeDuplicates { previous, current in
-      previous.0 == current.0
-        && previous.1 == current.1
-        && previous.2 == current.2
-        && previous.3 == current.3
+      previous.0 == current.0 && previous.1 == current.1
     }
     .dropFirst()
     .sink { [weak self] _ in
@@ -563,20 +530,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         forKey: Self.legacyContentModeStorageKey(contextKey: contextKey))
       switch legacyMode {
       case "codex": selectedProviders = [.codex]
-      case "claude": selectedProviders = [.claude]
       default: selectedProviders = Set(QuotaProviderCatalog.orderedProviders)
       }
     }
     let pinned =
       defaults.object(
         forKey: Self.singleResetPinnedStorageKey(contextKey: contextKey)) as? Bool ?? true
-    let multiPinned =
-      defaults.object(
-        forKey: Self.multiResetPinnedStorageKey(contextKey: contextKey)) as? Bool ?? false
     self.isRestoringFrame = true
     self.contentPreferences.setSelectedProviders(selectedProviders)
     self.contentPreferences.setSingleResetPinned(pinned)
-    self.contentPreferences.setMultiResetPinned(multiPinned)
     if let panel {
       self.applyWindowConstraints(panel)
     }
@@ -591,9 +553,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     UserDefaults.standard.set(
       self.contentPreferences.singleResetPinned,
       forKey: Self.singleResetPinnedStorageKey(contextKey: contextKey))
-    UserDefaults.standard.set(
-      self.contentPreferences.multiResetPinned,
-      forKey: Self.multiResetPinnedStorageKey(contextKey: contextKey))
   }
 
   private func applyWindowConstraints(_ panel: NSPanel) {
@@ -637,7 +596,4 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     "QuotaFloatSingleResetPinned.\(contextKey)"
   }
 
-  private static func multiResetPinnedStorageKey(contextKey: String) -> String {
-    "QuotaFloatMultiResetPinned.\(contextKey)"
-  }
 }

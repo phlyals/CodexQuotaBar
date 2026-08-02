@@ -7,35 +7,25 @@ protocol QuotaFetching: Sendable {
 
 enum QuotaFetchError: LocalizedError, Sendable {
   case noQuotaWindows(QuotaProvider)
-  case missingCredential(QuotaProvider)
 
   var errorDescription: String? {
     switch self {
     case .noQuotaWindows(let provider):
       "\(provider.displayName) 没有返回 5 小时或周额度。"
-    case .missingCredential(let provider):
-      "请右键设置 \(provider.displayName) Coding Plan API Key。"
     }
   }
 }
 
 struct CodexBarQuotaFetcher: QuotaFetching {
   private let baseEnvironment: [String: String]
-  private let kimiAPIKeyStore: any KimiAPIKeyStoring
-  private let claudeOAuthLoader: ClaudeOAuthSecurityCLILoader
   private let browserDetection: BrowserDetection
   private let codexFetcher: UsageFetcher
   private let claudeFetcher: ClaudeUsageFetcher
   private let settings: ProviderSettingsSnapshot
 
-  init(
-    environment: [String: String] = ProcessInfo.processInfo.environment,
-    kimiAPIKeyStore: any KimiAPIKeyStoring = SecureKimiAPIKeyStore()
-  ) {
+  init(environment: [String: String] = ProcessInfo.processInfo.environment) {
     let browserDetection = BrowserDetection()
     self.baseEnvironment = environment
-    self.kimiAPIKeyStore = kimiAPIKeyStore
-    self.claudeOAuthLoader = ClaudeOAuthSecurityCLILoader()
     self.browserDetection = browserDetection
     self.codexFetcher = UsageFetcher(environment: environment)
     self.claudeFetcher = ClaudeUsageFetcher(
@@ -60,12 +50,7 @@ struct CodexBarQuotaFetcher: QuotaFetching {
   }
 
   func fetch(_ provider: QuotaProvider) async throws -> QuotaSnapshot {
-    let environment = await self.environment(for: provider)
-    if provider.definition.credential == .kimiCodingPlanAPIKey,
-      ProviderTokenResolver.kimiAPIToken(environment: environment) == nil
-    {
-      throw QuotaFetchError.missingCredential(provider)
-    }
+    let environment = self.baseEnvironment
     let context = ProviderFetchContext(
       runtime: .app,
       sourceMode: .auto,
@@ -97,6 +82,7 @@ struct CodexBarQuotaFetcher: QuotaFetching {
       weekly: windows.weekly,
       resetCredits: Self.mapResetCredits(result.usage.codexResetCredits),
       accountEmail: result.usage.accountEmail(for: definition.coreProvider),
+      accountPlan: result.usage.identity(for: definition.coreProvider)?.loginMethod,
       source: result.sourceLabel,
       updatedAt: result.usage.updatedAt,
       freshness: .fresh,
@@ -137,32 +123,16 @@ struct CodexBarQuotaFetcher: QuotaFetching {
     )
   }
 
-  private func environment(for provider: QuotaProvider) async -> [String: String] {
-    var environment = self.baseEnvironment
-    if provider == .claude,
-      let credentials = await self.claudeOAuthLoader.load()
-    {
-      environment[ClaudeOAuthCredentialsStore.environmentTokenKey] = credentials.accessToken
-      environment[ClaudeOAuthCredentialsStore.environmentScopesKey] =
-        credentials.scopes.joined(separator: ",")
-    }
-    if provider.definition.credential == .kimiCodingPlanAPIKey,
-      let apiKey = self.kimiAPIKeyStore.load()
-    {
-      environment["KIMI_CODE_API_KEY"] = apiKey
-    }
-    return environment
-  }
-
   private static func fallbackWindow(
     usage: UsageSnapshot,
     fallback: QuotaWindowFallback
   ) -> (window: RateWindow, assumedMinutes: Int?)? {
-    let window: RateWindow? = switch fallback.lane {
-    case .primary: usage.primary
-    case .secondary: usage.secondary
-    case .tertiary: usage.tertiary
-    }
+    let window: RateWindow? =
+      switch fallback.lane {
+      case .primary: usage.primary
+      case .secondary: usage.secondary
+      case .tertiary: usage.tertiary
+      }
     guard let window, window.windowMinutes == nil else { return nil }
     return (window, fallback.assumedMinutes)
   }

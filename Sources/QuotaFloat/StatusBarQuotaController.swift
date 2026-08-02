@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import CoreText
+import SwiftUI
 
 struct StatusBarQuotaDisplay: Equatable {
   let sessionLine: String
@@ -11,11 +12,13 @@ struct StatusBarQuotaDisplay: Equatable {
 enum StatusBarQuotaFormatter {
   static func display(for snapshot: QuotaSnapshot?, isRefreshing: Bool) -> StatusBarQuotaDisplay {
     if isRefreshing, snapshot == nil {
-      return StatusBarQuotaDisplay(sessionLine: "5h --", weeklyLine: "W --", iconRemainingPercent: nil)
+      return StatusBarQuotaDisplay(
+        sessionLine: "5h --", weeklyLine: "W --", iconRemainingPercent: nil)
     }
 
     guard let snapshot else {
-      return StatusBarQuotaDisplay(sessionLine: "5h --", weeklyLine: "W --", iconRemainingPercent: nil)
+      return StatusBarQuotaDisplay(
+        sessionLine: "5h --", weeklyLine: "W --", iconRemainingPercent: nil)
     }
 
     let prefix: String
@@ -79,35 +82,37 @@ enum StatusBarQuotaFormatter {
 @MainActor
 final class StatusBarQuotaController: NSObject {
   private let store: QuotaStore
+  private let accountManager: CodexAccountManager
+  private let dashboardStore: CodexDashboardStore
   private let launchAtLoginController: LaunchAtLoginController
   private let statusItem: NSStatusItem
   private let statusView = StatusBarQuotaView()
   private var cancellables: Set<AnyCancellable> = []
 
-  init(store: QuotaStore, launchAtLoginController: LaunchAtLoginController = LaunchAtLoginController()) {
+  init(
+    store: QuotaStore,
+    accountManager: CodexAccountManager,
+    launchAtLoginController: LaunchAtLoginController = LaunchAtLoginController()
+  ) {
     self.store = store
+    self.accountManager = accountManager
+    self.dashboardStore = CodexDashboardStore(quotaStore: store)
     self.launchAtLoginController = launchAtLoginController
     self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     super.init()
     self.configureButton()
     self.observeStore()
     self.update()
+    self.dashboardStore.refreshLocalUsage()
   }
 
   private func configureButton() {
     self.statusItem.length = 64
     guard let button = self.statusItem.button else { return }
     button.title = ""
-    button.image = nil
+    button.imagePosition = .imageOnly
+    button.imageScaling = .scaleNone
     button.toolTip = "Codex 额度"
-    button.addSubview(self.statusView)
-    self.statusView.translatesAutoresizingMaskIntoConstraints = false
-    NSLayoutConstraint.activate([
-      self.statusView.leadingAnchor.constraint(equalTo: button.leadingAnchor),
-      self.statusView.trailingAnchor.constraint(equalTo: button.trailingAnchor),
-      self.statusView.topAnchor.constraint(equalTo: button.topAnchor),
-      self.statusView.bottomAnchor.constraint(equalTo: button.bottomAnchor),
-    ])
   }
 
   private func observeStore() {
@@ -118,12 +123,22 @@ final class StatusBarQuotaController: NSObject {
         self?.update()
       }
       .store(in: &self.cancellables)
+
+    self.accountManager.$accounts
+      .combineLatest(
+        self.accountManager.$isBusy,
+        self.accountManager.$currentSystemEmail
+      )
+      .receive(on: RunLoop.main)
+      .sink { [weak self] _ in self?.update() }
+      .store(in: &self.cancellables)
   }
 
   private func update() {
     let snapshot = self.store.snapshot(for: .codex)
     self.statusView.update(
       StatusBarQuotaFormatter.display(for: snapshot, isRefreshing: self.store.isRefreshing))
+    self.statusItem.button?.image = self.statusView.renderedImage()
     self.statusItem.menu = self.makeMenu(snapshot: snapshot)
   }
 
@@ -131,10 +146,57 @@ final class StatusBarQuotaController: NSObject {
     let menu = NSMenu()
     menu.autoenablesItems = false
 
-    for line in StatusBarQuotaFormatter.detailLines(for: snapshot) {
-      let item = NSMenuItem(title: line, action: nil, keyEquivalent: "")
-      item.isEnabled = false
+    let dashboardItem = NSMenuItem()
+    let dashboardView = CodexDashboardView(store: self.dashboardStore)
+    let hostingView = NSHostingView(rootView: dashboardView)
+    hostingView.frame = NSRect(x: 0, y: 0, width: 350, height: 460)
+    dashboardItem.view = hostingView
+    dashboardItem.isEnabled = true
+    menu.addItem(dashboardItem)
+
+    menu.addItem(.separator())
+
+    let accountHeader = NSMenuItem(title: "Codex 账号", action: nil, keyEquivalent: "")
+    accountHeader.isEnabled = false
+    menu.addItem(accountHeader)
+
+    for account in self.accountManager.accounts {
+      let label = account.workspaceLabel.map { "\(account.email) · \($0)" } ?? account.email
+      let item = NSMenuItem(
+        title: label,
+        action: #selector(self.switchAccount(_:)),
+        keyEquivalent: "")
+      item.target = self
+      item.representedObject = account.id.uuidString
+      item.state = account.isCurrentSystemAccount ? .on : .off
+      item.isEnabled = !self.accountManager.isBusy && !account.isCurrentSystemAccount
       menu.addItem(item)
+    }
+
+    let addAccountItem = NSMenuItem(
+      title: self.accountManager.isBusy ? "账号操作进行中…" : "添加 Codex 账号…",
+      action: #selector(self.addAccount),
+      keyEquivalent: "")
+    addAccountItem.target = self
+    addAccountItem.isEnabled = !self.accountManager.isBusy
+    menu.addItem(addAccountItem)
+
+    if !self.accountManager.accounts.isEmpty {
+      let manageItem = NSMenuItem(title: "移除已保存账号", action: nil, keyEquivalent: "")
+      let removeMenu = NSMenu()
+      for account in self.accountManager.accounts where !account.isCurrentSystemAccount {
+        let item = NSMenuItem(
+          title: account.email,
+          action: #selector(self.removeAccount(_:)),
+          keyEquivalent: "")
+        item.target = self
+        item.representedObject = account.id.uuidString
+        removeMenu.addItem(item)
+      }
+      if !removeMenu.items.isEmpty {
+        manageItem.submenu = removeMenu
+        menu.addItem(manageItem)
+      }
     }
 
     menu.addItem(.separator())
@@ -155,6 +217,13 @@ final class StatusBarQuotaController: NSObject {
     loginItem.state = self.launchAtLoginController.isEnabled ? .on : .off
     menu.addItem(loginItem)
 
+    let cleanupItem = NSMenuItem(
+      title: "清理旧版本凭据…",
+      action: #selector(self.cleanLegacyKimiCredential),
+      keyEquivalent: "")
+    cleanupItem.target = self
+    menu.addItem(cleanupItem)
+
     menu.addItem(.separator())
 
     let quitItem = NSMenuItem(
@@ -168,8 +237,98 @@ final class StatusBarQuotaController: NSObject {
   }
 
   @objc private func refresh() {
+    self.accountManager.reload()
     self.store.refresh()
+    self.dashboardStore.refreshLocalUsage(force: true)
     self.update()
+  }
+
+  @objc private func addAccount() {
+    Task { @MainActor [weak self] in
+      guard let self else { return }
+      do {
+        try await self.accountManager.addAccount()
+        self.store.refresh()
+        self.dashboardStore.refreshLocalUsage(force: true)
+      } catch {
+        self.showAccountError(title: "无法添加 Codex 账号", error: error)
+      }
+    }
+  }
+
+  @objc private func switchAccount(_ sender: NSMenuItem) {
+    guard let rawID = sender.representedObject as? String, let id = UUID(uuidString: rawID) else {
+      return
+    }
+    Task { @MainActor [weak self] in
+      guard let self else { return }
+      do {
+        try await self.accountManager.switchSystemAccount(id: id)
+        self.store.invalidateAndRefresh(.codex)
+        self.dashboardStore.refreshLocalUsage(force: true)
+        self.offerCodexRestartIfNeeded()
+      } catch {
+        self.showAccountError(title: "无法切换 Codex 账号", error: error)
+      }
+    }
+  }
+
+  @objc private func removeAccount(_ sender: NSMenuItem) {
+    guard let rawID = sender.representedObject as? String, let id = UUID(uuidString: rawID) else {
+      return
+    }
+    let alert = NSAlert()
+    alert.messageText = "移除这个已保存账号？"
+    alert.informativeText = "只会删除 QuotaFloat 保存的独立 Codex 登录，不会退出当前系统 Codex 账号。"
+    alert.alertStyle = .warning
+    alert.addButton(withTitle: "移除")
+    alert.addButton(withTitle: "取消")
+    guard alert.runModal() == .alertFirstButtonReturn else { return }
+    do {
+      try self.accountManager.removeAccount(id: id)
+    } catch {
+      self.showAccountError(title: "无法移除账号", error: error)
+    }
+  }
+
+  private func offerCodexRestartIfNeeded() {
+    guard
+      let running = NSRunningApplication.runningApplications(
+        withBundleIdentifier: "com.openai.codex"
+      ).first
+    else {
+      return
+    }
+    let appURL = running.bundleURL
+    let alert = NSAlert()
+    alert.messageText = "Codex 系统账号已经切换"
+    alert.informativeText =
+      "新的 CLI 会直接使用新账号。正在运行的 Codex 可能仍缓存旧登录；为确保 Desktop 同步，需要重新打开 Codex。请先确认当前任务已经保存。"
+    alert.alertStyle = .informational
+    alert.addButton(withTitle: "重新打开 Codex")
+    alert.addButton(withTitle: "稍后")
+    guard alert.runModal() == .alertFirstButtonReturn, let appURL else { return }
+
+    running.terminate()
+    Task { @MainActor in
+      for _ in 0..<30 where !running.isTerminated {
+        try? await Task.sleep(for: .milliseconds(100))
+      }
+      let configuration = NSWorkspace.OpenConfiguration()
+      configuration.activates = true
+      _ = try? await NSWorkspace.shared.openApplication(
+        at: appURL,
+        configuration: configuration)
+    }
+  }
+
+  private func showAccountError(title: String, error: Error) {
+    let alert = NSAlert()
+    alert.messageText = title
+    alert.informativeText = error.localizedDescription
+    alert.alertStyle = .critical
+    alert.addButton(withTitle: "好")
+    alert.runModal()
   }
 
   @objc private func toggleLaunchAtLogin() {
@@ -181,10 +340,28 @@ final class StatusBarQuotaController: NSObject {
     }
   }
 
+  @objc private func cleanLegacyKimiCredential() {
+    let alert = NSAlert()
+    alert.messageText = "删除旧 Kimi 凭据？"
+    alert.informativeText =
+      "新版本不再支持或读取 Kimi。此操作会永久删除 QuotaFloat 旧版本保存的 Kimi 钥匙串项目和旧密钥文件。"
+    alert.alertStyle = .warning
+    alert.addButton(withTitle: "删除")
+    alert.addButton(withTitle: "取消")
+    guard alert.runModal() == .alertFirstButtonReturn else { return }
+    do {
+      try LegacyProviderCredentialCleaner.removeRemnants()
+      self.update()
+    } catch {
+      self.showAccountError(title: "无法删除旧 Kimi 凭据", error: error)
+    }
+  }
+
   private func showLaunchAtLoginError(_ error: Error) {
     let alert = NSAlert()
     alert.messageText = "无法更新开机自启动"
-    alert.informativeText = "请先把 codex额度显示器.app 放入“应用程序”文件夹，然后再打开菜单重试。\n\n\(error.localizedDescription)"
+    alert.informativeText =
+      "请先把 codex额度显示器.app 放入“应用程序”文件夹，然后再打开菜单重试。\n\n\(error.localizedDescription)"
     alert.alertStyle = .warning
     alert.addButton(withTitle: "好")
     alert.runModal()
@@ -220,7 +397,7 @@ final class StatusBarQuotaView: NSView {
 
     for label in [self.sessionLabel, self.weeklyLabel] {
       label.font = .monospacedSystemFont(ofSize: 9.2, weight: .semibold)
-      label.textColor = .labelColor
+      label.textColor = .white
       label.alignment = .left
       label.lineBreakMode = .byClipping
       label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -254,9 +431,20 @@ final class StatusBarQuotaView: NSView {
     self.needsDisplay = true
   }
 
-  override func hitTest(_ point: NSPoint) -> NSView? {
-    _ = point
-    return nil
+  func renderedImage() -> NSImage {
+    let renderBounds = NSRect(x: 0, y: 0, width: 64, height: 22)
+    self.frame = renderBounds
+    self.layoutSubtreeIfNeeded()
+
+    guard let representation = self.bitmapImageRepForCachingDisplay(in: renderBounds) else {
+      return NSImage(size: renderBounds.size)
+    }
+    self.cacheDisplay(in: renderBounds, to: representation)
+
+    let image = NSImage(size: renderBounds.size)
+    image.addRepresentation(representation)
+    image.isTemplate = false
+    return image
   }
 }
 
@@ -303,7 +491,8 @@ final class QuotaStatusIconView: NSView {
     return Self.interpolate(from: yellow, to: green, progress: (value - 0.35) / 0.65)
   }
 
-  private static func interpolate(from start: NSColor, to end: NSColor, progress: Double) -> NSColor {
+  private static func interpolate(from start: NSColor, to end: NSColor, progress: Double) -> NSColor
+  {
     let start = start.usingColorSpace(.deviceRGB) ?? start
     let end = end.usingColorSpace(.deviceRGB) ?? end
     let t = min(1, max(0, progress))

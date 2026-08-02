@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 @testable import QuotaFloat
 
@@ -57,5 +58,34 @@ final class StatusBarQuotaFormatterTests: XCTestCase {
     XCTAssertEqual(
       StatusBarQuotaFormatter.display(for: snapshot, isRefreshing: false).iconRemainingPercent,
       18)
+  }
+
+  @MainActor
+  func testStatusBarViewRendersNativeButtonImageAtNonzeroHeight() {
+    let view = StatusBarQuotaView()
+    view.update(
+      StatusBarQuotaDisplay(
+        sessionLine: "5h 75%", weeklyLine: "W 60%", iconRemainingPercent: 75))
+
+    let image = view.renderedImage()
+
+    XCTAssertEqual(image.size, NSSize(width: 64, height: 22))
+    let representation = image.tiffRepresentation.flatMap(NSBitmapImageRep.init(data:))
+    XCTAssertNotNil(representation)
+
+    guard let representation else { return }
+    let textRegionStart = representation.pixelsWide / 3
+    let containsWhiteTextPixel = (0..<representation.pixelsHigh).contains { y in
+      (textRegionStart..<representation.pixelsWide).contains { x in
+        guard
+          let color = representation.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB)
+        else { return false }
+        return color.alphaComponent > 0.25
+          && color.redComponent > 0.8
+          && color.greenComponent > 0.8
+          && color.blueComponent > 0.8
+      }
+    }
+    XCTAssertTrue(containsWhiteTextPixel)
   }
 }

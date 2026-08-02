@@ -3,13 +3,6 @@ import Foundation
 
 enum QuotaProviderIcon: Sendable {
   case codex
-  case claude
-  case kimi
-}
-
-enum QuotaProviderCredential: Equatable, Sendable {
-  case none
-  case kimiCodingPlanAPIKey
 }
 
 enum QuotaWindowLane: Sendable {
@@ -35,7 +28,6 @@ struct QuotaProviderDefinition: Sendable {
   let coreProvider: UsageProvider
   let icon: QuotaProviderIcon
   let color: QuotaProviderColor
-  let credential: QuotaProviderCredential
   let sessionFallback: QuotaWindowFallback
   let weeklyFallback: QuotaWindowFallback
 }
@@ -48,27 +40,8 @@ enum QuotaProviderCatalog {
       coreProvider: .codex,
       icon: .codex,
       color: QuotaProviderColor(red: 0.42, green: 0.33, blue: 0.96),
-      credential: .none,
       sessionFallback: QuotaWindowFallback(lane: .primary, assumedMinutes: 300),
-      weeklyFallback: QuotaWindowFallback(lane: .secondary, assumedMinutes: 10_080)),
-    QuotaProviderDefinition(
-      id: .claude,
-      displayName: "Claude",
-      coreProvider: .claude,
-      icon: .claude,
-      color: QuotaProviderColor(red: 0.87, green: 0.43, blue: 0.29),
-      credential: .none,
-      sessionFallback: QuotaWindowFallback(lane: .primary, assumedMinutes: 300),
-      weeklyFallback: QuotaWindowFallback(lane: .secondary, assumedMinutes: 10_080)),
-    QuotaProviderDefinition(
-      id: .kimi,
-      displayName: "Kimi",
-      coreProvider: .kimi,
-      icon: .kimi,
-      color: QuotaProviderColor(red: 0.10, green: 0.10, blue: 0.12),
-      credential: .kimiCodingPlanAPIKey,
-      sessionFallback: QuotaWindowFallback(lane: .secondary, assumedMinutes: 300),
-      weeklyFallback: QuotaWindowFallback(lane: .primary, assumedMinutes: 10_080)),
+      weeklyFallback: QuotaWindowFallback(lane: .secondary, assumedMinutes: 10_080))
   ]
 
   private static let byID = Dictionary(uniqueKeysWithValues: Self.definitions.map { ($0.id, $0) })

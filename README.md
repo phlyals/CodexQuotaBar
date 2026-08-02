@@ -16,6 +16,7 @@ codex额度显示器 是一款原生 macOS 菜单栏额度工具，用于显示 
 
 - `CodexBarCore` 直接编译进应用，无需另外安装 CodexBar。
 - 菜单栏直接显示 Codex 的 5 小时额度与周额度剩余百分比。
+- 可添加多个 Codex ChatGPT 账号，并把额度显示与系统 Codex Desktop/CLI 登录一起切换。
 - 打包应用显示独立 App 图标，便于在 Finder、启动台和“应用程序”中识别。
 - 每 2 分钟刷新 Codex，也可以从菜单中手动立即刷新。
 - 可在菜单中勾选“开机自启动”。
@@ -58,30 +59,30 @@ codex额度显示器 当前读取 `CODEX_HOME/auth.json` 中的登录缓存；�
 如果用户将 Codex 凭证配置为只保存在 macOS 钥匙串，而本机没有 `auth.json`，当前版本暂时无法
 读取，需要将 Codex 凭证存储方式设置为 `file`，或通过 Codex CLI 重新生成这份登录缓存。
 
-### Claude
+## 多账号切换
 
-安装并登录 Claude Code。codex额度显示器 优先通过 macOS 自带的 `/usr/bin/security` 读取 Claude
-Code 已有 OAuth 凭证，然后请求 Anthropic 官方额度接口。codex额度显示器 不启用容易反复弹窗的
-Keychain API 读取方式；但 macOS 仍可能根据用户钥匙串状态和访问策略要求一次系统授权。读取失败
-时才尝试 Claude CLI 备用链路。
+1. 打开菜单栏图标，选择“添加 Codex 账号…”。应用会为该账号建立独立的 `CODEX_HOME`，并调用
+   官方 `codex login` 浏览器登录流程。
+2. 在“Codex 账号”列表点击一个账号。应用先保存当前系统账号，再用 `0600` 权限原子替换系统
+   `auth.json`，随后刷新该账号额度。
+3. 如果 Codex Desktop 正在运行，应用会询问是否重新打开。新启动的 CLI 直接使用新账号；正在运行
+   的 Desktop 可能缓存旧登录，因此建议在没有执行中任务时重新打开。
 
-即使 Claude CLI 被配置为连接其他模型服务，正常的 OAuth 取数链路也不会受影响。
+多账号同步切换要求 Codex 使用文件凭据：
 
-### Kimi
+```toml
+cli_auth_credentials_store = "file"
+```
 
-在浮窗上点击右键，选择“设置 Kimi API Key…”，输入 Kimi Coding Plan API Key。
+如果配置为 `keyring`，应用会在改动前拒绝切换并显示引导。
 
-新版本会优先将密钥保存在 macOS 钥匙串中。若你曾使用旧版本，旧的文件密钥会在首次读取时自动迁移
-到钥匙串；右键选择“清除 Kimi API Key”会同时清除钥匙串与旧文件中的密钥。
-
-旧版本曾使用的本地文件路径为：
-
-`~/Library/Application Support/QuotaFloat/kimi-code-api-key`
+旧版本的 Claude/Kimi 聚合功能已经移除。若检测到旧版本保存的 Kimi 凭据，菜单会提供经过确认的
+“清理旧版本凭据…”操作；应用不会静默删除用户密钥。
 
 ## 隐私
 
 codex额度显示器 不包含遥测、广告或用户行为统计，也不会把凭证和额度数据上传给作者。
-应用只连接当前所选模型服务对应的官方接口。
+应用只连接 Codex/OpenAI 对应的官方接口。
 
 详细说明参见 [PRIVACY.md](PRIVACY.md)。
 
@@ -115,7 +116,7 @@ Developer ID 签名与 Apple Notarization。
 swift run QuotaFloat --self-test
 ```
 
-自检不会请求 Codex、Claude 或 Kimi。
+自检不会请求 Codex，也不会读取或切换真实账号凭据。
 
 也可以运行单元测试：
 

@@ -41,7 +41,9 @@ struct CodexAuthIdentityReader {
     return CodexAuthIdentity(accountID: accountID, email: email)
   }
 
-  static func defaultAuthFileURL(environment: [String: String] = ProcessInfo.processInfo.environment) -> URL {
+  static func defaultAuthFileURL(
+    environment: [String: String] = ProcessInfo.processInfo.environment
+  ) -> URL {
     if let codexHome = environment["CODEX_HOME"], !codexHome.isEmpty {
       return URL(fileURLWithPath: codexHome, isDirectory: true)
         .appendingPathComponent("auth.json", isDirectory: false)

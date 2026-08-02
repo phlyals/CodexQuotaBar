@@ -6,19 +6,20 @@ QuotaFloat 是本地运行的开源 macOS 工具，不包含账号系统、广�
 
 - **Codex**：读取 `CODEX_HOME/auth.json` 中由 Codex Desktop、CLI 或 IDE 扩展共享的本机登录
   缓存；未设置 `CODEX_HOME` 时默认读取 `~/.codex/auth.json`。
-- **Claude**：优先调用 macOS 自带的 `/usr/bin/security`，读取 Claude Code 已保存的 OAuth
-  access token 和权限范围。凭证只在当前进程内存中用于请求 Anthropic 官方额度接口。QuotaFloat
-  不启用容易反复弹窗的 Keychain API 读取方式，但 macOS 仍可能根据钥匙串状态要求系统授权。
-- **Kimi**：由用户在 QuotaFloat 中手动输入 Coding Plan API Key。密钥保存在
-  macOS 钥匙串中。旧版本保存在
-  `~/Library/Application Support/QuotaFloat/kimi-code-api-key` 的密钥会在首次读取时自动迁移到
-  钥匙串；清除密钥时会同时清除钥匙串项与旧文件。
+- **Codex 多账号**：每个已添加账号保存在
+  `~/Library/Application Support/QuotaFloat/CodexHomes/` 下的独立目录；账号索引保存在同级
+  `managed-codex-accounts.json`。目录和凭据文件分别使用 `0700`、`0600` 权限。
+- **系统账号切换**：只在用户点击账号时，先备份当前系统账号，再原子替换系统 Codex
+  `auth.json`。应用不支持在 Keychain-only 模式下切换。
 
-QuotaFloat 不会把 Codex、Claude 或 Kimi 凭证写入项目目录，也不会在正常日志中输出凭证内容。
+QuotaFloat 不会把 Codex 凭证写入项目目录，也不会在正常日志中输出凭证内容。
+
+Claude 和 Kimi 聚合功能已移除。应用不会再读取它们的凭据。检测到旧版 QuotaFloat 保存的 Kimi
+凭据时，仅显示手动清理入口；只有用户确认后才会删除旧钥匙串项目和旧密钥文件。
 
 ## 网络请求
 
-额度刷新只会连接所选服务对应的官方接口。QuotaFloat 不会把凭证、额度数据或使用信息上传给
+额度刷新只会连接 Codex/OpenAI 对应的官方接口。QuotaFloat 不会把凭证、额度数据或使用信息上传给
 QuotaFloat 作者、分析平台、广告服务或其他非必要第三方。
 
 ## 本地数据

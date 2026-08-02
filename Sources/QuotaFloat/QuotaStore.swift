@@ -106,10 +106,12 @@ final class QuotaStore: ObservableObject {
     let now = Date()
     for provider in providers where self.activeProviders.contains(provider) {
       guard self.inFlightTasks[provider] == nil else { continue }
-      guard force || QuotaRefreshPolicy.isDue(
-        lastAttemptAt: self.lastAttemptByProvider[provider],
-        now: now,
-        refreshInterval: self.refreshInterval)
+      guard
+        force
+          || QuotaRefreshPolicy.isDue(
+            lastAttemptAt: self.lastAttemptByProvider[provider],
+            now: now,
+            refreshInterval: self.refreshInterval)
       else {
         continue
       }
@@ -232,11 +234,10 @@ final class QuotaStore: ObservableObject {
   }
 
   private static func userFacingMessage(provider: QuotaProvider, message: String) -> String {
-    switch Self.failureState(message) {
+    _ = provider
+    return switch Self.failureState(message) {
     case .authRequired:
-      provider.definition.credential == .kimiCodingPlanAPIKey
-        ? "请右键设置 Kimi Coding Plan API Key"
-        : "登录已失效，请重新登录对应 CLI"
+      "登录已失效，请重新登录 Codex"
     default:
       message
     }
