@@ -4,11 +4,24 @@ set -euo pipefail
 ROOT="${0:A:h:h}"
 cd "$ROOT"
 
-swift build -c release --product QuotaFloat
-BIN_DIR="$(swift build -c release --show-bin-path)"
+SWIFT_BUILD_FLAGS=()
+if [[ "${QUOTAFLOAT_DISABLE_SWIFTPM_SANDBOX:-0}" == "1" ]]; then
+  SWIFT_BUILD_FLAGS+=(--disable-sandbox)
+fi
+
+swift build "${SWIFT_BUILD_FLAGS[@]}" -c release --product QuotaFloat
+BIN_DIR="$(swift build "${SWIFT_BUILD_FLAGS[@]}" -c release --show-bin-path)"
 CODEXBAR_PACKAGE="$ROOT/.build/checkouts/CodexBar"
-swift build --package-path "$CODEXBAR_PACKAGE" -c release --product CodexBarCLI
-CODEXBAR_BIN_DIR="$(swift build --package-path "$CODEXBAR_PACKAGE" -c release --show-bin-path)"
+if [[ "${QUOTAFLOAT_USE_EXISTING_CODEXBAR_CLI:-0}" == "1" ]]; then
+  CODEXBAR_BIN_DIR="$CODEXBAR_PACKAGE/.build/arm64-apple-macosx/release"
+  if [[ ! -x "$CODEXBAR_BIN_DIR/CodexBarCLI" ]]; then
+    echo "Existing CodexBarCLI helper was requested but not found." >&2
+    exit 1
+  fi
+else
+  swift build "${SWIFT_BUILD_FLAGS[@]}" --package-path "$CODEXBAR_PACKAGE" -c release --product CodexBarCLI
+  CODEXBAR_BIN_DIR="$(swift build "${SWIFT_BUILD_FLAGS[@]}" --package-path "$CODEXBAR_PACKAGE" -c release --show-bin-path)"
+fi
 APP="$ROOT/dist/codex额度显示器.app"
 
 rm -rf "$APP"

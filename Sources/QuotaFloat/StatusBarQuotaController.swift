@@ -303,22 +303,20 @@ final class StatusBarQuotaController: NSObject {
     let alert = NSAlert()
     alert.messageText = "Codex 系统账号已经切换"
     alert.informativeText =
-      "新的 CLI 会直接使用新账号。正在运行的 Codex 可能仍缓存旧登录；为确保 Desktop 同步，需要重新打开 Codex。请先确认当前任务已经保存。"
+      "新的 CLI 会直接使用新账号。正在运行的 Codex 可能仍缓存旧登录；为确保 Desktop 同步，需要重新打开 Codex。请先确认当前任务已经保存；若 Codex 长时间无法退出，应用会强制结束旧实例。"
     alert.alertStyle = .informational
     alert.addButton(withTitle: "重新打开 Codex")
     alert.addButton(withTitle: "稍后")
     guard alert.runModal() == .alertFirstButtonReturn, let appURL else { return }
 
-    running.terminate()
-    Task { @MainActor in
-      for _ in 0..<30 where !running.isTerminated {
-        try? await Task.sleep(for: .milliseconds(100))
+    Task { @MainActor [weak self] in
+      do {
+        try await CodexApplicationRestarter().restart(
+          application: running,
+          appURL: appURL)
+      } catch {
+        self?.showAccountError(title: "无法重新打开 Codex", error: error)
       }
-      let configuration = NSWorkspace.OpenConfiguration()
-      configuration.activates = true
-      _ = try? await NSWorkspace.shared.openApplication(
-        at: appURL,
-        configuration: configuration)
     }
   }
 

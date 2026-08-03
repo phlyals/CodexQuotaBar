@@ -28,3 +28,22 @@ Record dated evidence for reuse, adaptation, rejection, and build-from-scratch d
   Codex Desktop process, so the app offers an explicit restart instead of claiming live reload.
 - Reassessment triggers: Codex changes credential format/storage defaults, CodexBar exports promotion as a
   library API, or upstream account tests fail after a dependency update.
+
+## 2026-08-03 — Reliable Codex desktop restart
+
+- Requirement and constraints: after switching the live Codex account, reliably close and reopen the macOS
+  Codex desktop app without adding a runtime or third-party dependency.
+- Search sources and queries: existing restart implementation; local macOS SDK headers for
+  `NSRunningApplication.terminate`, `isTerminated`, `forceTerminate`, and
+  `NSWorkspace.OpenConfiguration.createsNewApplicationInstance`.
+- Candidates: extend the existing AppKit APIs; invoke `/usr/bin/open`; launch the app executable directly.
+- Validation: local SDK documentation confirms termination is asynchronous and must be observed; four fake
+  process tests cover slow exit, forced exit, terminal timeout, and launch failure.
+- Selected strategy: reuse AppKit, wait up to 10 seconds for normal exit, force termination only after the
+  user-approved warning, wait another 5 seconds, then request a new non-substituted application instance.
+- Rejected alternatives: `/usr/bin/open` provides weaker typed error handling; direct executable launch
+  bypasses LaunchServices application semantics.
+- License and security conclusion: Apple system frameworks only; no new dependency, license notice, network
+  permission, credential access, or data collection.
+- Reassessment triggers: the Codex bundle identifier changes or macOS changes LaunchServices restart
+  behavior.
