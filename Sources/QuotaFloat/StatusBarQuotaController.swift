@@ -85,6 +85,7 @@ final class StatusBarQuotaController: NSObject {
   private let accountManager: CodexAccountManager
   private let dashboardStore: CodexDashboardStore
   private let launchAtLoginController: LaunchAtLoginController
+  private let onAuthMutation: @MainActor () -> Void
   private let statusItem: NSStatusItem
   private let statusView = StatusBarQuotaView()
   private var cancellables: Set<AnyCancellable> = []
@@ -92,11 +93,15 @@ final class StatusBarQuotaController: NSObject {
   init(
     store: QuotaStore,
     accountManager: CodexAccountManager,
-    launchAtLoginController: LaunchAtLoginController = LaunchAtLoginController()
+    launchAtLoginController: LaunchAtLoginController = LaunchAtLoginController(),
+    onAuthMutation: @escaping @MainActor () -> Void = {}
   ) {
     self.store = store
     self.accountManager = accountManager
-    self.dashboardStore = CodexDashboardStore(quotaStore: store)
+    self.onAuthMutation = onAuthMutation
+    self.dashboardStore = CodexDashboardStore(
+      quotaStore: store,
+      accountManager: accountManager)
     self.launchAtLoginController = launchAtLoginController
     self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     super.init()
@@ -132,6 +137,11 @@ final class StatusBarQuotaController: NSObject {
       .receive(on: RunLoop.main)
       .sink { [weak self] _ in self?.update() }
       .store(in: &self.cancellables)
+
+    self.accountManager.$currentSubscription
+      .receive(on: RunLoop.main)
+      .sink { [weak self] _ in self?.update() }
+      .store(in: &self.cancellables)
   }
 
   private func update() {
@@ -145,11 +155,15 @@ final class StatusBarQuotaController: NSObject {
   private func makeMenu(snapshot: QuotaSnapshot?) -> NSMenu {
     let menu = NSMenu()
     menu.autoenablesItems = false
+    menu.minimumWidth = 300
 
     let dashboardItem = NSMenuItem()
     let dashboardView = CodexDashboardView(store: self.dashboardStore)
     let hostingView = NSHostingView(rootView: dashboardView)
-    hostingView.frame = NSRect(x: 0, y: 0, width: 350, height: 460)
+    hostingView.frame = NSRect(x: 0, y: 0, width: 300, height: 1)
+    hostingView.layoutSubtreeIfNeeded()
+    let fittedHeight = ceil(hostingView.fittingSize.height)
+    hostingView.frame.size = NSSize(width: 300, height: max(1, min(450, fittedHeight)))
     dashboardItem.view = hostingView
     dashboardItem.isEnabled = true
     menu.addItem(dashboardItem)
@@ -161,7 +175,7 @@ final class StatusBarQuotaController: NSObject {
     menu.addItem(accountHeader)
 
     for account in self.accountManager.accounts {
-      let label = account.workspaceLabel.map { "\(account.email) · \($0)" } ?? account.email
+      let label = Self.accountMenuLabel(for: account)
       let item = NSMenuItem(
         title: label,
         action: #selector(self.switchAccount(_:)),
@@ -170,6 +184,7 @@ final class StatusBarQuotaController: NSObject {
       item.representedObject = account.id.uuidString
       item.state = account.isCurrentSystemAccount ? .on : .off
       item.isEnabled = !self.accountManager.isBusy && !account.isCurrentSystemAccount
+      item.toolTip = Self.accountMenuTooltip(for: account)
       menu.addItem(item)
     }
 
@@ -217,13 +232,6 @@ final class StatusBarQuotaController: NSObject {
     loginItem.state = self.launchAtLoginController.isEnabled ? .on : .off
     menu.addItem(loginItem)
 
-    let cleanupItem = NSMenuItem(
-      title: "清理旧版本凭据…",
-      action: #selector(self.cleanLegacyKimiCredential),
-      keyEquivalent: "")
-    cleanupItem.target = self
-    menu.addItem(cleanupItem)
-
     menu.addItem(.separator())
 
     let quitItem = NSMenuItem(
@@ -234,6 +242,76 @@ final class StatusBarQuotaController: NSObject {
     menu.addItem(quitItem)
 
     return menu
+  }
+
+  private static func accountMenuLabel(for account: CodexManagedAccountViewModel) -> String {
+    let dateText = Self.subscriptionShortText(account.subscription)
+    let workspace = account.workspaceLabel.map { " · \($0)" } ?? ""
+    let maxEmailLength = workspace.isEmpty ? 25 : 19
+    let email = Self.compactEmail(account.email, maxLength: maxEmailLength)
+    return "\(email)\(workspace) · \(dateText)"
+  }
+
+  private static func accountMenuTooltip(for account: CodexManagedAccountViewModel) -> String {
+    var lines = [account.email]
+    if let workspaceLabel = account.workspaceLabel, !workspaceLabel.isEmpty {
+      lines.append("Workspace：\(workspaceLabel)")
+    }
+    if let subscription = account.subscription {
+      if let activeStart = subscription.activeStart {
+        lines.append("本期开始：\(Self.subscriptionDate(activeStart))")
+      }
+      if let activeUntil = subscription.activeUntil {
+        lines.append("有效至：\(Self.subscriptionDate(activeUntil))")
+      }
+      if let lastChecked = subscription.lastChecked {
+        lines.append("最后核验：\(Self.subscriptionDateTime(lastChecked))")
+      }
+    } else {
+      lines.append("订阅日期未知")
+    }
+    return lines.joined(separator: "\n")
+  }
+
+  private static func subscriptionShortText(_ subscription: CodexSubscriptionMetadata?) -> String {
+    guard let subscription else { return "日期未知" }
+    switch subscription.status() {
+    case .expired:
+      return "已到期"
+    case .expiresToday:
+      return "今日到期"
+    case .active, .expiringSoon:
+      guard let activeUntil = subscription.activeUntil else { return "日期未知" }
+      return Self.subscriptionDate(activeUntil)
+    case .unknown:
+      return "日期未知"
+    }
+  }
+
+  private static func compactEmail(_ email: String, maxLength: Int) -> String {
+    let characters = Array(email)
+    guard characters.count > maxLength, maxLength > 5 else { return email }
+    let leftCount = max(2, (maxLength - 1) / 2)
+    let rightCount = max(2, maxLength - leftCount - 1)
+    return String(characters.prefix(leftCount))
+      + "…"
+      + String(characters.suffix(rightCount))
+  }
+
+  private static func subscriptionDate(_ value: Date) -> String {
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "zh_CN")
+    formatter.calendar = Calendar(identifier: .gregorian)
+    formatter.dateFormat = "M/d"
+    return formatter.string(from: value)
+  }
+
+  private static func subscriptionDateTime(_ value: Date) -> String {
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "zh_CN")
+    formatter.calendar = Calendar(identifier: .gregorian)
+    formatter.dateFormat = "M/d HH:mm"
+    return formatter.string(from: value)
   }
 
   @objc private func refresh() {
@@ -262,12 +340,17 @@ final class StatusBarQuotaController: NSObject {
     }
     Task { @MainActor [weak self] in
       guard let self else { return }
+      self.store.cancelInFlightRefresh(.codex)
+      self.dashboardStore.cancelLocalUsageRefresh()
       do {
         try await self.accountManager.switchSystemAccount(id: id)
+        self.onAuthMutation()
         self.store.invalidateAndRefresh(.codex)
         self.dashboardStore.refreshLocalUsage(force: true)
         self.offerCodexRestartIfNeeded()
       } catch {
+        self.store.refresh()
+        self.dashboardStore.refreshLocalUsage(force: true)
         self.showAccountError(title: "无法切换 Codex 账号", error: error)
       }
     }
@@ -337,23 +420,6 @@ final class StatusBarQuotaController: NSObject {
       self.update()
     } catch {
       self.showLaunchAtLoginError(error)
-    }
-  }
-
-  @objc private func cleanLegacyKimiCredential() {
-    let alert = NSAlert()
-    alert.messageText = "删除旧 Kimi 凭据？"
-    alert.informativeText =
-      "新版本不再支持或读取 Kimi。此操作会永久删除 QuotaFloat 旧版本保存的 Kimi 钥匙串项目和旧密钥文件。"
-    alert.alertStyle = .warning
-    alert.addButton(withTitle: "删除")
-    alert.addButton(withTitle: "取消")
-    guard alert.runModal() == .alertFirstButtonReturn else { return }
-    do {
-      try LegacyProviderCredentialCleaner.removeRemnants()
-      self.update()
-    } catch {
-      self.showAccountError(title: "无法删除旧 Kimi 凭据", error: error)
     }
   }
 
@@ -433,19 +499,35 @@ final class StatusBarQuotaView: NSView {
 
   func renderedImage() -> NSImage {
     let renderBounds = NSRect(x: 0, y: 0, width: 64, height: 22)
-    self.frame = renderBounds
-    self.layoutSubtreeIfNeeded()
-
-    guard let representation = self.bitmapImageRepForCachingDisplay(in: renderBounds) else {
-      return NSImage(size: renderBounds.size)
-    }
-    self.cacheDisplay(in: renderBounds, to: representation)
-
     let image = NSImage(size: renderBounds.size)
-    image.addRepresentation(representation)
     image.isTemplate = false
+    image.lockFocus()
+    defer { image.unlockFocus() }
+
+    self.iconView.drawIcon(in: NSRect(x: 3, y: 3.5, width: 15, height: 15))
+
+    let attributes: [NSAttributedString.Key: Any] = [
+      .font: NSFont.monospacedSystemFont(ofSize: 8.6, weight: .semibold),
+      .foregroundColor: NSColor.white,
+      .paragraphStyle: Self.statusTextParagraphStyle,
+    ]
+    let textRect = NSRect(x: 21, y: 1, width: 42, height: 20)
+    NSAttributedString(string: self.weeklyLabel.stringValue, attributes: attributes)
+      .draw(in: NSRect(x: textRect.minX, y: textRect.minY, width: textRect.width, height: 10))
+    NSAttributedString(string: self.sessionLabel.stringValue, attributes: attributes)
+      .draw(in: NSRect(x: textRect.minX, y: textRect.minY + 10, width: textRect.width, height: 10))
+
     return image
   }
+
+  private static let statusTextParagraphStyle: NSParagraphStyle = {
+    let style = NSMutableParagraphStyle()
+    style.alignment = .left
+    style.lineBreakMode = .byClipping
+    style.minimumLineHeight = 9
+    style.maximumLineHeight = 10
+    return style
+  }()
 }
 
 final class QuotaStatusIconView: NSView {
@@ -455,9 +537,14 @@ final class QuotaStatusIconView: NSView {
 
   override func draw(_ dirtyRect: NSRect) {
     super.draw(dirtyRect)
+    self.drawIcon(in: self.bounds)
+  }
+
+  func drawIcon(in rect: NSRect) {
     let font = NSFont.systemFont(ofSize: 14, weight: .black)
-    guard let path = Self.letterPath("C", font: font, in: self.bounds.insetBy(dx: 0.5, dy: 0.5))
-    else { return }
+    guard let path = Self.letterPath("C", font: font, in: rect.insetBy(dx: 0.5, dy: 0.5)) else {
+      return
+    }
 
     NSColor.black.withAlphaComponent(0.18).setStroke()
     path.lineWidth = 0.8

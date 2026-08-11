@@ -105,6 +105,12 @@ struct QuotaSnapshot: Codable, Equatable, Identifiable, Sendable {
   let provider: QuotaProvider
   let session: QuotaWindow?
   let weekly: QuotaWindow?
+  let sparkSession: QuotaWindow?
+  let sparkWeekly: QuotaWindow?
+  let creditsRemaining: Double?
+  let creditsUpdatedAt: Date?
+  let subscriptionExpiresAt: Date?
+  let subscriptionRenewsAt: Date?
   let resetCredits: QuotaResetCredits?
   let accountEmail: String?
   let accountPlan: String?
@@ -116,13 +122,23 @@ struct QuotaSnapshot: Codable, Equatable, Identifiable, Sendable {
   var id: QuotaProvider { self.provider }
 
   var hasQuotaData: Bool {
-    self.session != nil || self.weekly != nil
+    self.session != nil
+      || self.weekly != nil
+      || self.sparkSession != nil
+      || self.sparkWeekly != nil
+      || self.creditsRemaining != nil
   }
 
   init(
     provider: QuotaProvider,
     session: QuotaWindow?,
     weekly: QuotaWindow?,
+    sparkSession: QuotaWindow? = nil,
+    sparkWeekly: QuotaWindow? = nil,
+    creditsRemaining: Double? = nil,
+    creditsUpdatedAt: Date? = nil,
+    subscriptionExpiresAt: Date? = nil,
+    subscriptionRenewsAt: Date? = nil,
     resetCredits: QuotaResetCredits?,
     accountEmail: String?,
     accountPlan: String? = nil,
@@ -134,6 +150,12 @@ struct QuotaSnapshot: Codable, Equatable, Identifiable, Sendable {
     self.provider = provider
     self.session = session
     self.weekly = weekly
+    self.sparkSession = sparkSession
+    self.sparkWeekly = sparkWeekly
+    self.creditsRemaining = creditsRemaining
+    self.creditsUpdatedAt = creditsUpdatedAt
+    self.subscriptionExpiresAt = subscriptionExpiresAt
+    self.subscriptionRenewsAt = subscriptionRenewsAt
     self.resetCredits = resetCredits
     self.accountEmail = accountEmail
     self.accountPlan = accountPlan
@@ -166,6 +188,12 @@ struct QuotaSnapshot: Codable, Equatable, Identifiable, Sendable {
       provider: self.provider,
       session: self.session,
       weekly: self.weekly,
+      sparkSession: self.sparkSession,
+      sparkWeekly: self.sparkWeekly,
+      creditsRemaining: self.creditsRemaining,
+      creditsUpdatedAt: self.creditsUpdatedAt,
+      subscriptionExpiresAt: self.subscriptionExpiresAt,
+      subscriptionRenewsAt: self.subscriptionRenewsAt,
       resetCredits: self.resetCredits,
       accountEmail: self.accountEmail,
       accountPlan: self.accountPlan,

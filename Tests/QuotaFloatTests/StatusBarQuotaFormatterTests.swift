@@ -60,6 +60,30 @@ final class StatusBarQuotaFormatterTests: XCTestCase {
       18)
   }
 
+  func testSubscriptionDatesRoundTripWithQuotaSnapshot() {
+    let expiry = Date(timeIntervalSince1970: 1_800_000_000)
+    let renewal = Date(timeIntervalSince1970: 1_790_000_000)
+    let snapshot = QuotaSnapshot(
+      provider: .codex,
+      session: nil,
+      weekly: nil,
+      subscriptionExpiresAt: expiry,
+      subscriptionRenewsAt: renewal,
+      resetCredits: nil,
+      accountEmail: nil,
+      source: "oauth",
+      updatedAt: Date(timeIntervalSince1970: 1_000),
+      freshness: .fresh,
+      message: nil)
+
+    XCTAssertEqual(snapshot.subscriptionExpiresAt, expiry)
+    XCTAssertEqual(snapshot.subscriptionRenewsAt, renewal)
+    XCTAssertEqual(
+      snapshot.markingFailure("temporary", now: Date(timeIntervalSince1970: 1_100), staleAfter: 300)
+        .subscriptionRenewsAt,
+      renewal)
+  }
+
   @MainActor
   func testStatusBarViewRendersNativeButtonImageAtNonzeroHeight() {
     let view = StatusBarQuotaView()

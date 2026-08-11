@@ -54,7 +54,7 @@ struct CodexBarQuotaFetcher: QuotaFetching {
     let context = ProviderFetchContext(
       runtime: .app,
       sourceMode: .auto,
-      includeCredits: false,
+      includeCredits: true,
       includeOptionalUsage: provider == .codex,
       webTimeout: 30,
       webDebugDumpHTML: false,
@@ -72,7 +72,16 @@ struct CodexBarQuotaFetcher: QuotaFetching {
     let result = try await descriptor.fetch(context: context)
 
     let windows = Self.mapWindows(result.usage, definition: definition)
-    guard windows.session != nil || windows.weekly != nil else {
+    let sparkWindows = Self.mapSparkWindows(result.usage)
+    let creditsRemaining = result.credits?.remaining ?? result.dashboard?.creditsRemaining
+    let creditsUpdatedAt = result.credits?.updatedAt ?? result.dashboard?.updatedAt
+    guard
+      windows.session != nil
+        || windows.weekly != nil
+        || sparkWindows.session != nil
+        || sparkWindows.weekly != nil
+        || creditsRemaining != nil
+    else {
       throw QuotaFetchError.noQuotaWindows(provider)
     }
 
@@ -80,6 +89,12 @@ struct CodexBarQuotaFetcher: QuotaFetching {
       provider: provider,
       session: windows.session,
       weekly: windows.weekly,
+      sparkSession: sparkWindows.session,
+      sparkWeekly: sparkWindows.weekly,
+      creditsRemaining: creditsRemaining,
+      creditsUpdatedAt: creditsUpdatedAt,
+      subscriptionExpiresAt: result.usage.subscriptionExpiresAt,
+      subscriptionRenewsAt: result.usage.subscriptionRenewsAt,
       resetCredits: Self.mapResetCredits(result.usage.codexResetCredits),
       accountEmail: result.usage.accountEmail(for: definition.coreProvider),
       accountPlan: result.usage.identity(for: definition.coreProvider)?.loginMethod,
@@ -145,6 +160,60 @@ struct CodexBarQuotaFetcher: QuotaFetching {
       usedPercent: window.usedPercent,
       resetsAt: window.resetsAt,
       windowMinutes: window.windowMinutes ?? assumedMinutes)
+  }
+
+  static func mapSparkWindows(_ usage: UsageSnapshot) -> (
+    session: QuotaWindow?, weekly: QuotaWindow?
+  ) {
+    let candidates = (usage.extraRateWindows ?? []).filter { window in
+      [window.id, window.title]
+        .joined(separator: " ")
+        .lowercased()
+        .contains("spark")
+    }
+
+    func identity(for window: NamedRateWindow) -> String {
+      [window.id, window.title]
+        .joined(separator: " ")
+        .lowercased()
+    }
+
+    var weekly: NamedRateWindow?
+    var session: NamedRateWindow?
+    for candidate in candidates {
+      let value = identity(for: candidate)
+      if weekly == nil, value.contains("weekly") || value.contains("week") {
+        weekly = candidate
+      }
+      if session == nil,
+        value.contains("5-hour") || value.contains("5 hour") || value.contains("5h")
+      {
+        session = candidate
+      }
+    }
+    if weekly == nil {
+      for candidate in candidates {
+        guard let minutes = candidate.window.windowMinutes else { continue }
+        if minutes >= 6 * 24 * 60 {
+          weekly = candidate
+          break
+        }
+      }
+    }
+    if session == nil {
+      for candidate in candidates {
+        guard let minutes = candidate.window.windowMinutes else { continue }
+        if minutes > 0, minutes <= 6 * 60 {
+          session = candidate
+          break
+        }
+      }
+    }
+
+    return (
+      session: session.map { Self.mapWindow($0.window, assumedMinutes: nil) },
+      weekly: weekly.map { Self.mapWindow($0.window, assumedMinutes: nil) }
+    )
   }
 
   private static func mapResetCredits(

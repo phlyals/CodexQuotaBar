@@ -8,6 +8,7 @@ struct CodexManagedAccountViewModel: Identifiable, Equatable, Sendable {
   let email: String
   let workspaceLabel: String?
   let isCurrentSystemAccount: Bool
+  let subscription: CodexSubscriptionMetadata?
 }
 
 enum CodexAccountManagerError: LocalizedError, Equatable {
@@ -19,6 +20,7 @@ enum CodexAccountManagerError: LocalizedError, Equatable {
   case accountNotFound
   case targetAuthMissing
   case targetAuthUnreadable
+  case targetIdentityMismatch
   case liveAuthUnreadable
   case keyringCredentialStoreUnsupported
   case unsafeManagedHome
@@ -34,6 +36,7 @@ enum CodexAccountManagerError: LocalizedError, Equatable {
     case .accountNotFound: "该账号已不存在，请刷新后重试。"
     case .targetAuthMissing: "该账号缺少 auth.json，请重新添加账号。"
     case .targetAuthUnreadable: "无法读取该账号的 auth.json。"
+    case .targetIdentityMismatch: "该账号的凭据与保存的信息不一致，请重新添加账号。"
     case .liveAuthUnreadable: "当前系统 Codex 凭据无法安全备份，因此没有执行切换。"
     case .keyringCredentialStoreUnsupported:
       "当前 Codex 使用 macOS 钥匙串凭据。多账号同步切换需要在 ~/.codex/config.toml 中设置 cli_auth_credentials_store = \"file\"，然后重新登录。"
@@ -76,6 +79,7 @@ final class CodexAccountManager: ObservableObject {
   @Published private(set) var accounts: [CodexManagedAccountViewModel] = []
   @Published private(set) var isBusy = false
   @Published private(set) var currentSystemEmail: String?
+  @Published private(set) var currentSubscription: CodexSubscriptionMetadata?
   @Published private(set) var lastErrorMessage: String?
 
   private let paths: CodexAccountPaths
@@ -83,6 +87,7 @@ final class CodexAccountManager: ObservableObject {
   private let environment: [String: String]
   private let store: FileManagedCodexAccountStore
   private let loginRunner: LoginRunner
+  private var lastKnownSubscriptions: [UUID: CodexSubscriptionMetadata] = [:]
 
   init(
     paths: CodexAccountPaths = .defaults(),
@@ -105,25 +110,45 @@ final class CodexAccountManager: ObservableObject {
     do {
       let stored = try self.store.loadAccounts()
       let live = Self.readIdentity(homeURL: self.paths.liveHomeURL, environment: self.environment)
-      let liveFingerprint = CodexAuthFingerprint.fingerprint(
-        homePath: self.paths.liveHomeURL.path,
-        fileManager: self.fileManager)
+      let liveState = Self.readAuthState(homeURL: self.paths.liveHomeURL)
+      let liveFingerprint =
+        liveState?.fingerprint
+        ?? CodexAuthFingerprint.fingerprint(
+          homePath: self.paths.liveHomeURL.path,
+          fileManager: self.fileManager)
       self.currentSystemEmail = live?.email
-      self.accounts = stored.accounts
-        .sorted { $0.updatedAt > $1.updatedAt }
-        .map { account in
-          CodexManagedAccountViewModel(
-            id: account.id,
-            email: account.email,
-            workspaceLabel: account.workspaceLabel,
-            isCurrentSystemAccount: Self.matchesLiveAccount(
-              account,
-              live: live,
-              liveFingerprint: liveFingerprint))
+      var currentAccountID: UUID?
+      self.accounts = stored.accounts.sorted { $0.updatedAt > $1.updatedAt }.map { account in
+        let isCurrent = Self.matchesLiveAccount(
+          account,
+          live: live,
+          liveFingerprint: liveFingerprint)
+        if isCurrent { currentAccountID = account.id }
+
+        let accountState: CodexAuthState?
+        if isCurrent {
+          accountState = liveState
+        } else {
+          accountState = Self.readAuthState(
+            homeURL: URL(fileURLWithPath: account.managedHomePath, isDirectory: true))
         }
+        let subscription = self.subscription(
+          for: account.id,
+          state: accountState)
+        return CodexManagedAccountViewModel(
+          id: account.id,
+          email: account.email,
+          workspaceLabel: account.workspaceLabel,
+          isCurrentSystemAccount: isCurrent,
+          subscription: subscription)
+      }
+      self.currentSubscription =
+        liveState?.subscription
+        ?? currentAccountID.flatMap { self.lastKnownSubscriptions[$0]?.markingCached() }
       self.lastErrorMessage = nil
     } catch {
       self.accounts = []
+      self.currentSubscription = nil
       self.lastErrorMessage = error.localizedDescription
     }
   }
@@ -216,6 +241,15 @@ final class CodexAccountManager: ObservableObject {
       throw CodexAccountManagerError.targetAuthUnreadable
     }
 
+    guard
+      let targetIdentity = Self.readIdentity(
+        homeURL: URL(fileURLWithPath: target.managedHomePath, isDirectory: true),
+        environment: self.environment),
+      Self.matchesLiveAccount(target, live: targetIdentity, liveFingerprint: nil)
+    else {
+      throw CodexAccountManagerError.targetIdentityMismatch
+    }
+
     let targetFingerprint = CodexAuthFingerprint.fingerprint(data: targetData)
     let liveFingerprint = CodexAuthFingerprint.fingerprint(
       homePath: self.paths.liveHomeURL.path,
@@ -225,20 +259,60 @@ final class CodexAccountManager: ObservableObject {
       return
     }
 
-    var updatedAccounts = snapshot.accounts
-    if liveFingerprint != nil {
-      updatedAccounts = try self.preserveLiveAccount(in: updatedAccounts)
-      try self.store.storeAccounts(
-        ManagedCodexAccountSet(
-          version: FileManagedCodexAccountStore.currentVersion,
-          accounts: updatedAccounts))
+    let liveAuthURL = self.paths.liveHomeURL.appendingPathComponent("auth.json")
+    let previousLiveData: Data?
+    if self.fileManager.fileExists(atPath: liveAuthURL.path) {
+      guard let data = try? Data(contentsOf: liveAuthURL), !data.isEmpty else {
+        throw CodexAccountManagerError.liveAuthUnreadable
+      }
+      previousLiveData = data
+    } else {
+      previousLiveData = nil
     }
+
+    var updatedAccounts = snapshot.accounts
+    var createdLiveAccountHomePath: String?
+    if liveFingerprint != nil {
+      let preserved = try self.preserveLiveAccount(in: updatedAccounts)
+      updatedAccounts = preserved.accounts
+      createdLiveAccountHomePath = preserved.createdHomePath
+    }
+
     do {
       try Self.atomicReplaceAuth(
         targetData,
         liveHomeURL: self.paths.liveHomeURL,
         fileManager: self.fileManager)
+
+      guard
+        let activeIdentity = Self.readIdentity(
+          homeURL: self.paths.liveHomeURL, environment: self.environment),
+        Self.matchesLiveAccount(target, live: activeIdentity, liveFingerprint: targetFingerprint)
+      else {
+        throw CodexAccountManagerError.targetIdentityMismatch
+      }
+
+      if liveFingerprint != nil {
+        try self.store.storeAccounts(
+          ManagedCodexAccountSet(
+            version: FileManagedCodexAccountStore.currentVersion,
+            accounts: updatedAccounts))
+      }
     } catch {
+      if let previousLiveData {
+        try? Self.atomicReplaceAuth(
+          previousLiveData,
+          liveHomeURL: self.paths.liveHomeURL,
+          fileManager: self.fileManager)
+      }
+      if let createdLiveAccountHomePath {
+        try? self.removeManagedHomeIfSafe(createdLiveAccountHomePath)
+      }
+      if let accountError = error as? CodexAccountManagerError,
+        accountError == .targetIdentityMismatch
+      {
+        throw accountError
+      }
       throw CodexAccountManagerError.switchFailed
     }
     self.reload()
@@ -259,7 +333,7 @@ final class CodexAccountManager: ObservableObject {
   }
 
   private func preserveLiveAccount(in accounts: [ManagedCodexAccount]) throws
-    -> [ManagedCodexAccount]
+    -> (accounts: [ManagedCodexAccount], createdHomePath: String?)
   {
     let liveAuthURL = self.paths.liveHomeURL.appendingPathComponent("auth.json")
     guard let liveData = try? Data(contentsOf: liveAuthURL), !liveData.isEmpty,
@@ -275,8 +349,28 @@ final class CodexAccountManager: ObservableObject {
     if let existing = accounts.first(where: {
       Self.matchesLiveAccount($0, live: identity, liveFingerprint: liveFingerprint)
     }) {
-      _ = existing
-      return accounts
+      try self.validateManagedHome(existing.managedHomePath)
+      let managedHomeURL = URL(
+        fileURLWithPath: existing.managedHomePath,
+        isDirectory: true)
+      try Self.atomicReplaceAuth(
+        liveData,
+        liveHomeURL: managedHomeURL,
+        fileManager: self.fileManager)
+      let now = Date().timeIntervalSince1970
+      let refreshed = ManagedCodexAccount(
+        id: existing.id,
+        email: existing.email,
+        providerAccountID: existing.providerAccountID ?? providerID,
+        workspaceLabel: existing.workspaceLabel,
+        workspaceAccountID: existing.workspaceAccountID,
+        authFingerprint: liveFingerprint,
+        managedHomePath: existing.managedHomePath,
+        createdAt: existing.createdAt,
+        updatedAt: now,
+        lastAuthenticatedAt: now)
+      let updatedAccounts = accounts.map { $0.id == existing.id ? refreshed : $0 }
+      return (updatedAccounts, nil)
     }
 
     let id = UUID()
@@ -297,7 +391,7 @@ final class CodexAccountManager: ObservableObject {
         createdAt: now,
         updatedAt: now,
         lastAuthenticatedAt: now)
-      return accounts + [account]
+      return (accounts + [account], homeURL.path)
     } catch {
       try? self.removeManagedHomeIfSafe(homeURL.path)
       throw error
@@ -312,6 +406,22 @@ final class CodexAccountManager: ObservableObject {
     let account = UsageFetcher(environment: env).loadAuthBackedCodexAccount()
     guard account.identity != .unresolved || account.email != nil else { return nil }
     return account
+  }
+
+  nonisolated private static func readAuthState(homeURL: URL) -> CodexAuthState? {
+    CodexSubscriptionMetadataReader.read(
+      authFileURL: homeURL.appendingPathComponent("auth.json", isDirectory: false))
+  }
+
+  private func subscription(
+    for accountID: UUID,
+    state: CodexAuthState?
+  ) -> CodexSubscriptionMetadata? {
+    if let subscription = state?.subscription {
+      self.lastKnownSubscriptions[accountID] = subscription
+      return subscription
+    }
+    return self.lastKnownSubscriptions[accountID]?.markingCached()
   }
 
   private static func matchesLiveAccount(
@@ -391,7 +501,7 @@ final class CodexAccountManager: ObservableObject {
     homeURL: URL,
     environment: [String: String],
     fileManager: FileManager = .default,
-    timeout: TimeInterval = 10
+    timeout: TimeInterval = 30
   ) async -> CodexAuthBackedAccount? {
     let deadline = Date().addingTimeInterval(timeout)
     repeat {
@@ -457,6 +567,45 @@ final class CodexAccountManager: ObservableObject {
   }
 }
 
+private final class CodexProcessOutputCapture: @unchecked Sendable {
+  private let handle: FileHandle
+  private let lock = NSLock()
+  private var data = Data()
+
+  init(pipe: Pipe) {
+    self.handle = pipe.fileHandleForReading
+  }
+
+  func start() {
+    self.handle.readabilityHandler = { [weak self] handle in
+      self?.appendAvailableData(from: handle)
+    }
+  }
+
+  func finish() -> Data {
+    self.handle.readabilityHandler = nil
+    let remaining = self.handle.readDataToEndOfFile()
+    self.append(remaining)
+    self.lock.lock()
+    let result = self.data
+    self.lock.unlock()
+    return result
+  }
+
+  private func appendAvailableData(from handle: FileHandle) {
+    let data = handle.availableData
+    guard !data.isEmpty else { return }
+    self.append(data)
+  }
+
+  private func append(_ data: Data) {
+    guard !data.isEmpty else { return }
+    self.lock.lock()
+    self.data.append(data)
+    self.lock.unlock()
+  }
+}
+
 struct CodexAccountLoginRunner {
   struct Result: Sendable {
     enum Outcome: Sendable { case success, timedOut, failed, missingBinary, launchFailed }
@@ -471,43 +620,95 @@ struct CodexAccountLoginRunner {
   ) async -> Result {
     await Task.detached(priority: .userInitiated) {
       var env = CodexHomeScope.scopedEnvironment(base: environment, codexHome: homePath)
-      let commonPaths = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
-      env["PATH"] = ([env["PATH"]].compactMap { $0 } + commonPaths).joined(separator: ":")
+      env["PATH"] = PathBuilder.effectivePATH(
+        purposes: [.rpc, .tty, .nodeTooling],
+        env: env)
       guard let executable = Self.findCodex(environment: env) else {
         return Result(outcome: .missingBinary, output: "")
       }
 
       let process = Process()
-      process.executableURL = URL(fileURLWithPath: executable)
-      process.arguments = ["login"]
+      process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+      process.arguments = [executable, "login"]
       process.environment = env
-      let output = Pipe()
-      process.standardOutput = output
-      process.standardError = output
+      let stdout = Pipe()
+      let stderr = Pipe()
+      process.standardOutput = stdout
+      process.standardError = stderr
+      let stdoutCapture = CodexProcessOutputCapture(pipe: stdout)
+      let stderrCapture = CodexProcessOutputCapture(pipe: stderr)
       do {
         try process.run()
       } catch {
         return Result(outcome: .launchFailed, output: error.localizedDescription)
       }
+      let processGroup = Self.attachProcessGroup(process)
+      stdoutCapture.start()
+      stderrCapture.start()
 
       let deadline = Date().addingTimeInterval(timeout)
       while process.isRunning, Date() < deadline {
         try? await Task.sleep(for: .milliseconds(100))
       }
       if process.isRunning {
-        process.terminate()
-        return Result(outcome: .timedOut, output: "")
+        Self.terminate(process, processGroup: processGroup)
+        return Result(
+          outcome: .timedOut,
+          output: Self.combinedOutput(
+            stdout: stdoutCapture.finish(), stderr: stderrCapture.finish()))
       }
-      let data = output.fileHandleForReading.readDataToEndOfFile()
-      let text = String(decoding: data, as: UTF8.self).trimmingCharacters(
-        in: .whitespacesAndNewlines)
+      let text = Self.combinedOutput(
+        stdout: stdoutCapture.finish(), stderr: stderrCapture.finish())
       return Result(
         outcome: process.terminationStatus == 0 ? .success : .failed,
-        output: String(text.prefix(2000)))
+        output: text)
     }.value
   }
 
+  private static func combinedOutput(stdout: Data, stderr: Data) -> String {
+    let out = String(decoding: stdout, as: UTF8.self).trimmingCharacters(
+      in: .whitespacesAndNewlines)
+    let err = String(decoding: stderr, as: UTF8.self).trimmingCharacters(
+      in: .whitespacesAndNewlines)
+    let combined: String
+    if !out.isEmpty, !err.isEmpty {
+      combined = [out, err].joined(separator: "\n")
+    } else {
+      combined = out + err
+    }
+    return String(combined.prefix(4000))
+  }
+
+  private static func attachProcessGroup(_ process: Process) -> pid_t? {
+    let pid = process.processIdentifier
+    return setpgid(pid, pid) == 0 ? pid : nil
+  }
+
+  private static func terminate(_ process: Process, processGroup: pid_t?) {
+    if let processGroup {
+      kill(-processGroup, SIGTERM)
+    }
+    if process.isRunning {
+      process.terminate()
+    }
+
+    let deadline = Date().addingTimeInterval(2)
+    while process.isRunning, Date() < deadline {
+      usleep(100_000)
+    }
+
+    if process.isRunning {
+      if let processGroup {
+        kill(-processGroup, SIGKILL)
+      }
+      kill(process.processIdentifier, SIGKILL)
+    }
+  }
+
   private static func findCodex(environment: [String: String]) -> String? {
+    if let resolved = BinaryLocator.resolveCodexBinary(env: environment) {
+      return resolved
+    }
     for directory in environment["PATH", default: ""].split(separator: ":") {
       let path = URL(fileURLWithPath: String(directory)).appendingPathComponent("codex").path
       if FileManager.default.isExecutableFile(atPath: path) { return path }

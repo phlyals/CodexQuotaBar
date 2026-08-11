@@ -90,10 +90,19 @@ final class QuotaStore: ObservableObject {
   }
 
   func invalidateAndRefresh(_ provider: QuotaProvider) {
+    self.cancelInFlightRefresh(provider)
     self.snapshots.removeValue(forKey: provider)
     self.lastAttemptByProvider.removeValue(forKey: provider)
     self.cacheStore.save(Array(self.snapshots.values))
     self.refresh(providers: [provider], force: true)
+  }
+
+  func cancelInFlightRefresh(_ provider: QuotaProvider) {
+    self.inFlightTasks[provider]?.cancel()
+    self.inFlightTasks.removeValue(forKey: provider)
+    self.inFlightTokens.removeValue(forKey: provider)
+    self.isRefreshing = !self.inFlightTasks.isEmpty
+    self.scheduleNextRefresh()
   }
 
   func snapshot(for provider: QuotaProvider) -> QuotaSnapshot? {

@@ -148,6 +148,122 @@ final class CodexAccountManagerTests: XCTestCase {
     XCTAssertNotNil(stored.account(email: "old@example.com", providerAccountID: "old-account"))
   }
 
+  @MainActor
+  func testSwitchRejectsMismatchedTargetWithoutMutatingLiveAuth() async throws {
+    let root = try self.makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let liveHome = root.appendingPathComponent("live", isDirectory: true)
+    let homesRoot = root.appendingPathComponent("homes", isDirectory: true)
+    let targetHome = homesRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: liveHome, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: targetHome, withIntermediateDirectories: true)
+
+    let liveAuth = try Self.authJSON(email: "old@example.com", accountID: "old-account")
+    let targetAuth = try Self.authJSON(email: "actual@example.com", accountID: "actual-account")
+    try liveAuth.write(to: liveHome.appendingPathComponent("auth.json"))
+    try targetAuth.write(to: targetHome.appendingPathComponent("auth.json"))
+
+    let targetID = UUID()
+    let now = Date().timeIntervalSince1970
+    let storeURL = root.appendingPathComponent("accounts.json")
+    let store = FileManagedCodexAccountStore(fileURL: storeURL)
+    try store.storeAccounts(
+      ManagedCodexAccountSet(
+        version: FileManagedCodexAccountStore.currentVersion,
+        accounts: [
+          ManagedCodexAccount(
+            id: targetID,
+            email: "saved@example.com",
+            providerAccountID: "saved-account",
+            authFingerprint: CodexAuthFingerprint.fingerprint(data: targetAuth),
+            managedHomePath: targetHome.path,
+            createdAt: now,
+            updatedAt: now,
+            lastAuthenticatedAt: now)
+        ]))
+
+    let paths = CodexAccountPaths(
+      applicationSupportRoot: root,
+      managedHomesRoot: homesRoot,
+      accountStoreURL: storeURL,
+      liveHomeURL: liveHome)
+    let manager = CodexAccountManager(paths: paths, environment: [:])
+
+    do {
+      try await manager.switchSystemAccount(id: targetID)
+      XCTFail("Expected target identity mismatch")
+    } catch {
+      XCTAssertEqual(error as? CodexAccountManagerError, .targetIdentityMismatch)
+    }
+
+    XCTAssertEqual(
+      try Data(contentsOf: liveHome.appendingPathComponent("auth.json")), liveAuth)
+    XCTAssertEqual(try store.loadAccounts().accounts.count, 1)
+  }
+
+  @MainActor
+  func testSwitchSynchronizesRefreshedLiveCredentialsToExistingManagedAccount() async throws {
+    let root = try self.makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let liveHome = root.appendingPathComponent("live", isDirectory: true)
+    let homesRoot = root.appendingPathComponent("homes", isDirectory: true)
+    let oldHome = homesRoot.appendingPathComponent("old", isDirectory: true)
+    let targetHome = homesRoot.appendingPathComponent("target", isDirectory: true)
+    try FileManager.default.createDirectory(at: liveHome, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: oldHome, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: targetHome, withIntermediateDirectories: true)
+
+    let staleOldAuth = try Self.authJSON(
+      email: "old@example.com", accountID: "old-account", marker: "stale")
+    let refreshedOldAuth = try Self.authJSON(
+      email: "old@example.com", accountID: "old-account", marker: "refreshed")
+    let targetAuth = try Self.authJSON(email: "new@example.com", accountID: "new-account")
+    try staleOldAuth.write(to: oldHome.appendingPathComponent("auth.json"))
+    try refreshedOldAuth.write(to: liveHome.appendingPathComponent("auth.json"))
+    try targetAuth.write(to: targetHome.appendingPathComponent("auth.json"))
+
+    let oldID = UUID()
+    let targetID = UUID()
+    let now = Date().timeIntervalSince1970
+    let storeURL = root.appendingPathComponent("accounts.json")
+    let store = FileManagedCodexAccountStore(fileURL: storeURL)
+    try store.storeAccounts(
+      ManagedCodexAccountSet(
+        version: FileManagedCodexAccountStore.currentVersion,
+        accounts: [
+          ManagedCodexAccount(
+            id: oldID,
+            email: "old@example.com",
+            providerAccountID: "old-account",
+            authFingerprint: CodexAuthFingerprint.fingerprint(data: staleOldAuth),
+            managedHomePath: oldHome.path,
+            createdAt: now,
+            updatedAt: now,
+            lastAuthenticatedAt: now),
+          ManagedCodexAccount(
+            id: targetID,
+            email: "new@example.com",
+            providerAccountID: "new-account",
+            authFingerprint: CodexAuthFingerprint.fingerprint(data: targetAuth),
+            managedHomePath: targetHome.path,
+            createdAt: now,
+            updatedAt: now,
+            lastAuthenticatedAt: now),
+        ]))
+
+    let paths = CodexAccountPaths(
+      applicationSupportRoot: root,
+      managedHomesRoot: homesRoot,
+      accountStoreURL: storeURL,
+      liveHomeURL: liveHome)
+    let manager = CodexAccountManager(paths: paths, environment: [:])
+
+    try await manager.switchSystemAccount(id: targetID)
+
+    XCTAssertEqual(
+      try Data(contentsOf: oldHome.appendingPathComponent("auth.json")), refreshedOldAuth)
+  }
+
   private func makeTemporaryDirectory() throws -> URL {
     let url = FileManager.default.temporaryDirectory
       .appendingPathComponent("CodexAccountManagerTests-\(UUID().uuidString)", isDirectory: true)
@@ -168,6 +284,26 @@ final class CodexAccountManagerTests: XCTestCase {
       "tokens": [
         "access_token": "access-\(accountID)",
         "refresh_token": "refresh-\(accountID)",
+        "id_token": "header.\(encodedPayload).signature",
+        "account_id": accountID,
+      ]
+    ])
+  }
+
+  private static func authJSON(email: String, accountID: String, marker: String) throws -> Data {
+    let payload = try JSONSerialization.data(withJSONObject: [
+      "email": email,
+      "session_marker": marker,
+      "https://api.openai.com/auth": ["chatgpt_account_id": accountID],
+    ])
+    let encodedPayload = payload.base64EncodedString()
+      .replacingOccurrences(of: "+", with: "-")
+      .replacingOccurrences(of: "/", with: "_")
+      .replacingOccurrences(of: "=", with: "")
+    return try JSONSerialization.data(withJSONObject: [
+      "tokens": [
+        "access_token": "access-\(accountID)-\(marker)",
+        "refresh_token": "refresh-\(accountID)-\(marker)",
         "id_token": "header.\(encodedPayload).signature",
         "account_id": accountID,
       ]

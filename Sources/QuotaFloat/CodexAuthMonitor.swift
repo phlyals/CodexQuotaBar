@@ -1,3 +1,4 @@
+import CodexBarCore
 import Foundation
 
 struct CodexAuthIdentity: Equatable, Sendable {
@@ -18,27 +19,24 @@ struct CodexAuthIdentityReader {
   }
 
   func read() -> CodexAuthIdentity? {
-    guard
-      let data = try? Data(contentsOf: self.fileURL)
-    else {
+    self.readState()?.identity
+  }
+
+  func readState() -> CodexAuthState? {
+    guard let data = self.fileManager.contents(atPath: self.fileURL.path), !data.isEmpty else {
       return nil
     }
-
-    return Self.identity(from: data)
+    return Self.state(
+      from: data,
+      fingerprint: CodexAuthFingerprint.fingerprint(data: data))
   }
 
   static func identity(from data: Data) -> CodexAuthIdentity? {
-    guard
-      let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-      let tokens = root["tokens"] as? [String: Any]
-    else {
-      return nil
-    }
+    Self.state(from: data)?.identity
+  }
 
-    let accountID = Self.trimmedString(tokens["account_id"] ?? tokens["accountId"])
-    let email = Self.email(fromIDToken: Self.trimmedString(tokens["id_token"] ?? tokens["idToken"]))
-    guard accountID != nil || email != nil else { return nil }
-    return CodexAuthIdentity(accountID: accountID, email: email)
+  static func state(from data: Data, fingerprint: String? = nil) -> CodexAuthState? {
+    CodexSubscriptionMetadataReader.state(from: data, fingerprint: fingerprint)
   }
 
   static func defaultAuthFileURL(
@@ -52,46 +50,20 @@ struct CodexAuthIdentityReader {
       .appendingPathComponent(".codex", isDirectory: true)
       .appendingPathComponent("auth.json", isDirectory: false)
   }
-
-  private static func trimmedString(_ value: Any?) -> String? {
-    guard let string = value as? String else { return nil }
-    let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
-    return trimmed.isEmpty ? nil : trimmed
-  }
-
-  private static func email(fromIDToken idToken: String?) -> String? {
-    guard let idToken else { return nil }
-    let parts = idToken.split(separator: ".")
-    guard parts.count >= 2 else { return nil }
-
-    var payload = String(parts[1])
-      .replacingOccurrences(of: "-", with: "+")
-      .replacingOccurrences(of: "_", with: "/")
-    let padding = (4 - payload.count % 4) % 4
-    payload.append(String(repeating: "=", count: padding))
-
-    guard
-      let data = Data(base64Encoded: payload),
-      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-    else {
-      return nil
-    }
-    return Self.trimmedString(json["email"])
-  }
 }
 
 @MainActor
 final class CodexAuthMonitor {
   private let reader: CodexAuthIdentityReader
   private let interval: TimeInterval
-  private let onChange: @MainActor () -> Void
-  private var lastIdentity: CodexAuthIdentity?
+  private let onChange: @MainActor (CodexAuthChange) -> Void
+  private var lastState: CodexAuthState?
   private var timer: Timer?
 
   init(
     reader: CodexAuthIdentityReader = CodexAuthIdentityReader(),
     interval: TimeInterval = 5,
-    onChange: @escaping @MainActor () -> Void
+    onChange: @escaping @MainActor (CodexAuthChange) -> Void
   ) {
     self.reader = reader
     self.interval = interval
@@ -100,7 +72,7 @@ final class CodexAuthMonitor {
 
   func start() {
     guard self.timer == nil else { return }
-    self.lastIdentity = self.reader.read()
+    self.lastState = self.reader.readState()
     self.timer = Timer.scheduledTimer(withTimeInterval: self.interval, repeats: true) {
       [weak self] _ in
       Task { @MainActor [weak self] in
@@ -114,14 +86,20 @@ final class CodexAuthMonitor {
     self.timer = nil
   }
 
+  func acceptCurrentState() {
+    self.lastState = self.reader.readState()
+  }
+
   func poll() {
-    guard let identity = self.reader.read() else { return }
-    defer { self.lastIdentity = identity }
-    guard let lastIdentity else {
-      self.onChange()
+    guard let state = self.reader.readState() else { return }
+    guard let lastState = self.lastState else {
+      self.lastState = state
       return
     }
-    guard identity != lastIdentity else { return }
-    self.onChange()
+    guard let change = CodexAuthChange.classify(previous: lastState, current: state) else {
+      return
+    }
+    self.lastState = state
+    self.onChange(change)
   }
 }

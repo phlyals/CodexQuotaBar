@@ -190,14 +190,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     NSApplication.shared.setActivationPolicy(.accessory)
     self.contentPreferences.setSelectedProviders([.codex])
     self.store.setActiveProviders([.codex])
-    self.statusBarController = StatusBarQuotaController(
-      store: self.store,
-      accountManager: self.accountManager)
-    self.codexAuthMonitor = CodexAuthMonitor { [weak self] in
-      Task { @MainActor [weak self] in
-        self?.store.invalidateAndRefresh(.codex)
+    self.codexAuthMonitor = CodexAuthMonitor { [weak self] change in
+      guard let self else { return }
+      self.accountManager.reload()
+      switch change {
+      case .accountChanged:
+        self.store.invalidateAndRefresh(.codex)
+      case .credentialsRotated, .metadataChanged:
+        self.store.refresh()
       }
     }
+    self.statusBarController = StatusBarQuotaController(
+      store: self.store,
+      accountManager: self.accountManager,
+      onAuthMutation: { [weak self] in
+        self?.codexAuthMonitor?.acceptCurrentState()
+      })
     self.store.start()
     self.codexAuthMonitor?.start()
   }
