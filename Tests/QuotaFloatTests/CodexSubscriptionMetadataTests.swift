@@ -18,7 +18,7 @@ final class CodexSubscriptionMetadataTests: XCTestCase {
     XCTAssertEqual(state?.identity?.accountID, "subscription-account")
     XCTAssertEqual(state?.identity?.email, "subscription@example.com")
     XCTAssertEqual(subscription.source, .idToken)
-    XCTAssertEqual(subscription.freshness, .fresh)
+    XCTAssertEqual(subscription.freshness, .cached)
     XCTAssertEqual(
       subscription.activeStart,
       ISO8601DateFormatter().date(from: "2026-08-01T01:00:00Z"))
@@ -64,7 +64,7 @@ final class CodexSubscriptionMetadataTests: XCTestCase {
       activeStart: now.addingTimeInterval(-86_400),
       activeUntil: now.addingTimeInterval(3 * 86_400 + 1),
       lastChecked: now,
-      source: .idToken,
+      source: .quotaFallback,
       freshness: .fresh)
 
     XCTAssertEqual(subscription.daysRemaining(now: now), 4)

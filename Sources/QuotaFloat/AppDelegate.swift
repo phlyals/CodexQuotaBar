@@ -156,10 +156,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     "com.apple.Terminal",
   ]
 
-  private let store = QuotaStore(fetcher: CodexBarQuotaFetcher())
-  private let accountManager = CodexAccountManager()
-  private let displayPreferences = DisplayPreferences()
-  private let contentPreferences = ContentPreferences()
+  private lazy var store = QuotaStore(fetcher: CodexBarQuotaFetcher())
+  private lazy var accountManager = CodexAccountManager()
+  private lazy var displayPreferences = DisplayPreferences()
+  private lazy var contentPreferences = ContentPreferences()
   private var statusBarController: StatusBarQuotaController?
   private var panel: NSPanel?
   private var displayModeObserver: AnyCancellable?
@@ -174,7 +174,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
   func applicationDidFinishLaunching(_ notification: Notification) {
     _ = notification
     KeychainAccessGate.forceDisabledForProcess(
-      reason: "QuotaFloat uses file-based credentials and CLI fallback")
+      reason: "QuotaFloat uses file-based OAuth credentials")
 
     if CommandLine.arguments.contains("--self-test") {
       do {
@@ -192,6 +192,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     self.store.setActiveProviders([.codex])
     self.codexAuthMonitor = CodexAuthMonitor { [weak self] change in
       guard let self else { return }
+      self.accountManager.synchronizeLiveCredentials()
       self.accountManager.reload()
       switch change {
       case .accountChanged:
@@ -206,8 +207,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
       onAuthMutation: { [weak self] in
         self?.codexAuthMonitor?.acceptCurrentState()
       })
+    self.accountManager.synchronizeLiveCredentials()
     self.store.start()
     self.codexAuthMonitor?.start()
+    if CommandLine.arguments.contains("--show-menu")
+      || CommandLine.arguments.contains("--show-details")
+    {
+      self.statusBarController?.showMenu()
+    }
   }
 
   func applicationWillTerminate(_ notification: Notification) {
@@ -219,7 +226,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     self.displayModeObserver?.cancel()
     self.contentModeObserver?.cancel()
     self.codexAuthMonitor?.stop()
+    self.statusBarController?.stop()
     self.store.stop()
+  }
+
+  func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool
+  {
+    self.statusBarController?.showMenu()
+    return true
   }
 
   func windowShouldClose(_ sender: NSWindow) -> Bool {

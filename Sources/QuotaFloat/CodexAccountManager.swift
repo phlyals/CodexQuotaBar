@@ -9,6 +9,7 @@ struct CodexManagedAccountViewModel: Identifiable, Equatable, Sendable {
   let workspaceLabel: String?
   let isCurrentSystemAccount: Bool
   let subscription: CodexSubscriptionMetadata?
+  var accountKey: String? = nil
 }
 
 enum CodexAccountManagerError: LocalizedError, Equatable {
@@ -140,7 +141,8 @@ final class CodexAccountManager: ObservableObject {
           email: account.email,
           workspaceLabel: account.workspaceLabel,
           isCurrentSystemAccount: isCurrent,
-          subscription: subscription)
+          subscription: subscription,
+          accountKey: accountState?.identity?.cacheKey)
       }
       self.currentSubscription =
         liveState?.subscription
@@ -150,6 +152,45 @@ final class CodexAccountManager: ObservableObject {
       self.accounts = []
       self.currentSubscription = nil
       self.lastErrorMessage = error.localizedDescription
+    }
+  }
+
+  func synchronizeLiveCredentials() {
+    guard !self.isBusy else { return }
+    do {
+      let stored = try self.store.loadAccounts()
+      let liveURL = self.paths.liveHomeURL.appendingPathComponent("auth.json")
+      guard let liveData = try? Data(contentsOf: liveURL),
+        let key = CodexAuthIdentityReader.identity(from: liveData)?.cacheKey,
+        let existing = stored.accounts.first(where: {
+          guard let id = $0.providerAccountID else { return false }
+          return CodexAuthIdentity.cacheKey(accountID: id, workspaceID: $0.workspaceAccountID)
+            == key
+        })
+      else { return }
+      try self.validateManagedHome(existing.managedHomePath)
+      let backupURL = URL(fileURLWithPath: existing.managedHomePath).appendingPathComponent(
+        "auth.json")
+      guard (try? Data(contentsOf: backupURL)) != liveData else { return }
+      guard (try? Data(contentsOf: liveURL)) == liveData else { return }
+      try Self.atomicReplaceAuth(
+        liveData, liveHomeURL: backupURL.deletingLastPathComponent(), fileManager: self.fileManager)
+      guard (try? Data(contentsOf: liveURL)) == liveData,
+        CodexAuthIdentityReader(fileURL: backupURL).read()?.cacheKey == key
+      else { return }
+      let now = Date().timeIntervalSince1970
+      let refreshed = ManagedCodexAccount(
+        id: existing.id, email: existing.email, providerAccountID: existing.providerAccountID,
+        workspaceLabel: existing.workspaceLabel, workspaceAccountID: existing.workspaceAccountID,
+        authFingerprint: CodexAuthFingerprint.fingerprint(data: liveData),
+        managedHomePath: existing.managedHomePath,
+        createdAt: existing.createdAt, updatedAt: now, lastAuthenticatedAt: now)
+      try self.store.storeAccounts(
+        ManagedCodexAccountSet(
+          version: FileManagedCodexAccountStore.currentVersion,
+          accounts: stored.accounts.map { $0.id == existing.id ? refreshed : $0 }))
+    } catch {
+      self.lastErrorMessage = "登录副本同步失败，原登录保持不变"
     }
   }
 

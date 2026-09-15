@@ -258,6 +258,12 @@ final class CodexAccountManagerTests: XCTestCase {
       liveHomeURL: liveHome)
     let manager = CodexAccountManager(paths: paths, environment: [:])
 
+    manager.synchronizeLiveCredentials()
+    manager.synchronizeLiveCredentials()
+    XCTAssertEqual(
+      try Data(contentsOf: oldHome.appendingPathComponent("auth.json")), refreshedOldAuth)
+    XCTAssertEqual(
+      try Data(contentsOf: liveHome.appendingPathComponent("auth.json")), refreshedOldAuth)
     try await manager.switchSystemAccount(id: targetID)
 
     XCTAssertEqual(

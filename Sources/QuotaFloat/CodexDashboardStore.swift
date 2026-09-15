@@ -9,11 +9,20 @@ final class CodexDashboardStore: ObservableObject {
   @Published private(set) var localUsage: CodexLocalUsageSnapshot?
   @Published private(set) var isLoadingLocalUsage = false
   @Published private(set) var localUsageMessage: String?
+  @Published private(set) var now = Date()
+  private(set) var lastLocalAttempt: Date?
+
+  var effectiveSubscription: CodexSubscriptionMetadata? {
+    CodexSubscriptionCheck.resolve(
+      record: subscription, snapshot: quota, accountKey: quota?.accountKey)
+  }
 
   private let quotaStore: QuotaStore
   private let localUsageFetcher: any CodexLocalUsageFetching
   private var localUsageTask: Task<Void, Never>?
   private var localUsageToken: UUID?
+  private var timerTask: Task<Void, Never>?
+  private var lastBoundaryKey: String?
   private var cancellables: Set<AnyCancellable> = []
 
   init(
@@ -28,13 +37,13 @@ final class CodexDashboardStore: ObservableObject {
     self.subscription = accountManager?.currentSubscription
     quotaStore.$snapshots
       .map { $0[.codex] }
-      .receive(on: RunLoop.main)
+      .receive(on: DispatchQueue.main)
       .sink { [weak self] in self?.quota = $0 }
       .store(in: &self.cancellables)
     if let accountManager {
       accountManager.$currentSubscription
         .combineLatest(accountManager.$currentSystemEmail)
-        .receive(on: RunLoop.main)
+        .receive(on: DispatchQueue.main)
         .sink { [weak self] subscription, email in
           self?.subscription = subscription
           self?.currentAccountEmail = email
@@ -43,12 +52,48 @@ final class CodexDashboardStore: ObservableObject {
     }
   }
 
-  func refreshLocalUsage(force: Bool = false) {
-    if force {
-      self.cancelLocalUsageRefresh()
-    } else {
-      guard self.localUsageTask == nil else { return }
+  func start() {
+    guard self.timerTask == nil else { return }
+    self.tick()
+    self.timerTask = Task { [weak self] in
+      while !Task.isCancelled {
+        do { try await Task.sleep(for: .seconds(15)) } catch { return }
+        guard !Task.isCancelled else { return }
+        self?.tick()
+      }
     }
+  }
+
+  func tick(now: Date = Date(), menuOpened: Bool = false) {
+    self.now = now
+    if let quota = self.quota, let key = quota.accountKey {
+      let dates =
+        [quota.session?.resetsAt, quota.weekly?.resetsAt].compactMap { $0 }
+        + (quota.resetCredits?.expirationDates ?? [])
+      if let crossed = dates.filter({ $0 <= now && $0 >= quota.updatedAt }).max() {
+        let boundaryKey = "\(key):\(crossed.timeIntervalSince1970)"
+        if self.lastBoundaryKey != boundaryKey {
+          self.lastBoundaryKey = boundaryKey
+          self.quotaStore.refresh()
+        }
+      }
+    }
+    let interval: TimeInterval = menuOpened ? 60 : 120
+    let crossedDay =
+      self.localUsage?.updatedAt.map {
+        !Calendar.current.isDate($0, inSameDayAs: now)
+      } ?? false
+    if self.lastLocalAttempt == nil
+      || now.timeIntervalSince(self.lastLocalAttempt!) >= interval
+      || (crossedDay && now.timeIntervalSince(self.lastLocalAttempt!) >= 30)
+    {
+      self.refreshLocalUsage()
+    }
+  }
+
+  func refreshLocalUsage(force: Bool = false) {
+    guard self.localUsageTask == nil else { return }
+    self.lastLocalAttempt = Date()
     let fetcher = self.localUsageFetcher
     let token = UUID()
     self.isLoadingLocalUsage = true
@@ -65,7 +110,7 @@ final class CodexDashboardStore: ObservableObject {
         self?.finishLocalUsageRefresh(token: token)
       } catch {
         guard let self, self.localUsageToken == token else { return }
-        self.localUsageMessage = error.localizedDescription
+        self.localUsageMessage = "本机用量读取失败，显示上次扫描结果"
         self.finishLocalUsageRefresh(token: token)
       }
     }
@@ -79,6 +124,8 @@ final class CodexDashboardStore: ObservableObject {
   }
 
   func stop() {
+    self.timerTask?.cancel()
+    self.timerTask = nil
     self.cancelLocalUsageRefresh()
   }
 

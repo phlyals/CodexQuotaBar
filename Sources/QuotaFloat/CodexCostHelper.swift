@@ -57,6 +57,57 @@ struct CodexLocalUsageSnapshot: Codable, Equatable, Sendable {
         : lhs.value.cost < rhs.value.cost
     }?.key
   }
+
+  func calendarDays(now: Date = Date(), calendar: Calendar = .current) -> [DailyEntry] {
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.calendar = calendar
+    formatter.timeZone = calendar.timeZone
+    formatter.dateFormat = "yyyy-MM-dd"
+    let today = calendar.startOfDay(for: now)
+    let scannedDay = self.updatedAt.map { calendar.startOfDay(for: $0) }
+    let firstScanned = scannedDay.flatMap {
+      calendar.date(byAdding: .day, value: -(max(1, self.historyDays ?? 30) - 1), to: $0)
+    }
+    let byDate = Dictionary(
+      self.daily.map { ($0.date, $0) }, uniquingKeysWith: { first, _ in first })
+    return (-29...0).compactMap { offset in
+      guard let day = calendar.date(byAdding: .day, value: offset, to: today) else { return nil }
+      let key = formatter.string(from: day)
+      if let entry = byDate[key] { return entry }
+      let covered = scannedDay.map { day <= $0 } == true && firstScanned.map { day >= $0 } == true
+      return DailyEntry(
+        date: key, inputTokens: covered ? 0 : nil, outputTokens: covered ? 0 : nil,
+        cacheReadTokens: nil, cacheCreationTokens: nil, totalTokens: covered ? 0 : nil,
+        totalCost: covered ? 0 : nil, modelsUsed: [], modelBreakdowns: [])
+    }
+  }
+
+  var hasPartialPricing: Bool {
+    self.daily.contains { day in
+      if day.totalTokens ?? 0 > 0, day.totalCost == nil { return true }
+      return day.modelBreakdowns?.contains {
+        ($0.totalTokens ?? 0) > 0 && $0.cost == nil
+      } == true
+    }
+  }
+
+  func today(now: Date = Date(), calendar: Calendar = .current) -> DailyEntry? {
+    self.calendarDays(now: now, calendar: calendar).last
+  }
+
+  func totalCost(now: Date = Date()) -> Double? {
+    let days = self.calendarDays(now: now)
+    let active = days.filter { ($0.totalTokens ?? 0) > 0 }
+    if !active.isEmpty, active.allSatisfy({ $0.totalCost == nil }) { return nil }
+    let values = days.compactMap(\.totalCost)
+    return values.isEmpty ? nil : values.reduce(0, +)
+  }
+
+  func totalTokens(now: Date = Date()) -> Int? {
+    let values = self.calendarDays(now: now).compactMap(\.totalTokens)
+    return values.isEmpty ? nil : values.reduce(0, +)
+  }
 }
 
 protocol CodexLocalUsageFetching: Sendable {
@@ -110,6 +161,7 @@ struct CodexCostHelper: CodexLocalUsageFetching {
   func fetch(forceRefresh: Bool) async throws -> CodexLocalUsageSnapshot {
     guard let helperURL else { throw HelperError.missingHelper }
     var arguments = ["cost", "--provider", "codex", "--format", "json", "--json-only"]
+    // Incremental scans remain cheap; --refresh invalidates the helper's scan TTL.
     if forceRefresh { arguments.append("--refresh") }
     var helperEnvironment = self.environment
     // Keep the helper independent from a separately installed CodexBar's config. Older CodexBar

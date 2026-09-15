@@ -4,10 +4,16 @@ import ServiceManagement
 @MainActor
 protocol LaunchAtLoginServicing {
   var isEnabled: Bool { get }
+  var requiresApproval: Bool { get }
   func setEnabled(_ enabled: Bool) throws
 }
 
+extension LaunchAtLoginServicing {
+  var requiresApproval: Bool { false }
+}
+
 struct SystemLaunchAtLoginService: LaunchAtLoginServicing {
+  var requiresApproval: Bool { SMAppService.mainApp.status == .requiresApproval }
   var isEnabled: Bool {
     SMAppService.mainApp.status == .enabled
   }
@@ -35,6 +41,10 @@ final class LaunchAtLoginController {
   var isEnabled: Bool {
     self.service.isEnabled
   }
+
+  var requiresApproval: Bool { self.service.requiresApproval }
+
+  func openSystemSettings() { SMAppService.openSystemSettingsLoginItems() }
 
   @discardableResult
   func toggle() throws -> Bool {

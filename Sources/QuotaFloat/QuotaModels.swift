@@ -30,7 +30,7 @@ struct QuotaWindow: Codable, Equatable, Sendable {
   let windowMinutes: Int?
 
   init(usedPercent: Double, resetsAt: Date?, windowMinutes: Int?) {
-    self.usedPercent = min(100, max(0, usedPercent.isFinite ? usedPercent : 0))
+    self.usedPercent = usedPercent
     self.resetsAt = resetsAt
     self.windowMinutes = windowMinutes
   }
@@ -38,6 +38,8 @@ struct QuotaWindow: Codable, Equatable, Sendable {
   var remainingPercent: Double {
     max(0, 100 - self.usedPercent)
   }
+
+  var isValid: Bool { self.usedPercent.isFinite && (0...100).contains(self.usedPercent) }
 
   func paceEvaluation(now: Date) -> QuotaPaceEvaluation? {
     if self.remainingPercent == 0 {
@@ -82,6 +84,7 @@ struct QuotaWindow: Codable, Equatable, Sendable {
 struct QuotaResetCredits: Codable, Equatable, Sendable {
   let availableCount: Int
   let expirationDates: [Date]
+  var details: [QuotaResetCredit]? = nil
 
   init(availableCount: Int, expirationDates: [Date]) {
     self.availableCount = max(0, availableCount)
@@ -90,6 +93,17 @@ struct QuotaResetCredits: Codable, Equatable, Sendable {
 
   var nextExpirationDate: Date? {
     self.expirationDates.first
+  }
+}
+
+struct QuotaResetCredit: Codable, Equatable, Identifiable, Sendable {
+  let id: String
+  let status: String
+  let expiresAt: Date?
+  let scope: String
+
+  func isAvailable(now: Date) -> Bool {
+    self.status == "available" && (self.expiresAt.map { $0 > now } ?? true)
   }
 }
 
@@ -108,11 +122,14 @@ struct QuotaSnapshot: Codable, Equatable, Identifiable, Sendable {
   let sparkSession: QuotaWindow?
   let sparkWeekly: QuotaWindow?
   let creditsRemaining: Double?
+  let creditsUnlimited: Bool?
   let creditsUpdatedAt: Date?
   let subscriptionExpiresAt: Date?
   let subscriptionRenewsAt: Date?
+  var subscriptionCheck: CodexSubscriptionCheck? = nil
   let resetCredits: QuotaResetCredits?
   let accountEmail: String?
+  let accountKey: String?
   let accountPlan: String?
   let source: String
   let updatedAt: Date
@@ -127,6 +144,8 @@ struct QuotaSnapshot: Codable, Equatable, Identifiable, Sendable {
       || self.sparkSession != nil
       || self.sparkWeekly != nil
       || self.creditsRemaining != nil
+      || self.creditsUnlimited == true
+      || self.resetCredits != nil
   }
 
   init(
@@ -136,11 +155,13 @@ struct QuotaSnapshot: Codable, Equatable, Identifiable, Sendable {
     sparkSession: QuotaWindow? = nil,
     sparkWeekly: QuotaWindow? = nil,
     creditsRemaining: Double? = nil,
+    creditsUnlimited: Bool? = nil,
     creditsUpdatedAt: Date? = nil,
     subscriptionExpiresAt: Date? = nil,
     subscriptionRenewsAt: Date? = nil,
     resetCredits: QuotaResetCredits?,
     accountEmail: String?,
+    accountKey: String? = nil,
     accountPlan: String? = nil,
     source: String,
     updatedAt: Date,
@@ -148,16 +169,18 @@ struct QuotaSnapshot: Codable, Equatable, Identifiable, Sendable {
     message: String?
   ) {
     self.provider = provider
-    self.session = session
-    self.weekly = weekly
-    self.sparkSession = sparkSession
-    self.sparkWeekly = sparkWeekly
-    self.creditsRemaining = creditsRemaining
+    self.session = session.flatMap { $0.isValid ? $0 : nil }
+    self.weekly = weekly.flatMap { $0.isValid ? $0 : nil }
+    self.sparkSession = sparkSession.flatMap { $0.isValid ? $0 : nil }
+    self.sparkWeekly = sparkWeekly.flatMap { $0.isValid ? $0 : nil }
+    self.creditsRemaining = creditsRemaining.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }
+    self.creditsUnlimited = creditsUnlimited
     self.creditsUpdatedAt = creditsUpdatedAt
     self.subscriptionExpiresAt = subscriptionExpiresAt
     self.subscriptionRenewsAt = subscriptionRenewsAt
     self.resetCredits = resetCredits
     self.accountEmail = accountEmail
+    self.accountKey = accountKey
     self.accountPlan = accountPlan
     self.source = source
     self.updatedAt = updatedAt
@@ -183,24 +206,30 @@ struct QuotaSnapshot: Codable, Equatable, Identifiable, Sendable {
       message: message)
   }
 
-  private func replacing(freshness: QuotaFreshness, message: String?) -> QuotaSnapshot {
-    QuotaSnapshot(
+  func replacing(
+    freshness: QuotaFreshness, message: String?, accountKey: String? = nil
+  ) -> QuotaSnapshot {
+    var result = QuotaSnapshot(
       provider: self.provider,
       session: self.session,
       weekly: self.weekly,
       sparkSession: self.sparkSession,
       sparkWeekly: self.sparkWeekly,
       creditsRemaining: self.creditsRemaining,
+      creditsUnlimited: self.creditsUnlimited,
       creditsUpdatedAt: self.creditsUpdatedAt,
       subscriptionExpiresAt: self.subscriptionExpiresAt,
       subscriptionRenewsAt: self.subscriptionRenewsAt,
       resetCredits: self.resetCredits,
       accountEmail: self.accountEmail,
+      accountKey: accountKey ?? self.accountKey,
       accountPlan: self.accountPlan,
       source: self.source,
       updatedAt: self.updatedAt,
       freshness: freshness,
       message: message)
+    result.subscriptionCheck = self.subscriptionCheck
+    return result
   }
 }
 
@@ -209,7 +238,7 @@ struct QuotaCache: Codable, Sendable {
   let snapshots: [QuotaSnapshot]
 
   init(snapshots: [QuotaSnapshot]) {
-    self.version = 1
+    self.version = 2
     self.snapshots = snapshots
   }
 }

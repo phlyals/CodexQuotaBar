@@ -19,14 +19,14 @@ enum QuotaFloatSelfTest {
       "QuotaFloat must keep CodexBarCore keychain access disabled")
 
     try self.check(
-      QuotaWindow(usedPercent: -10, resetsAt: nil, windowMinutes: 300).usedPercent == 0,
-      "negative usage must clamp to zero")
+      !QuotaWindow(usedPercent: -10, resetsAt: nil, windowMinutes: 300).isValid,
+      "negative usage must be rejected, not converted to full quota")
     try self.check(
-      QuotaWindow(usedPercent: 140, resetsAt: nil, windowMinutes: 300).usedPercent == 100,
-      "usage above 100 must clamp")
+      !QuotaWindow(usedPercent: 140, resetsAt: nil, windowMinutes: 300).isValid,
+      "usage above 100 must be rejected")
     try self.check(
-      QuotaWindow(usedPercent: .infinity, resetsAt: nil, windowMinutes: 300).usedPercent == 0,
-      "non-finite usage must normalize")
+      !QuotaWindow(usedPercent: .infinity, resetsAt: nil, windowMinutes: 300).isValid,
+      "non-finite usage must stay unknown")
 
     let paceNow = Date(timeIntervalSince1970: 20_000)
     let halfWindowReset = paceNow.addingTimeInterval(150 * 60)

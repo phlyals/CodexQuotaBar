@@ -9,7 +9,7 @@ struct CodexDashboardView: View {
   private var quota: QuotaSnapshot? { self.store.quota }
   private var usage: CodexLocalUsageSnapshot? { self.store.localUsage }
   private let accent = Color(red: 0.23, green: 0.60, blue: 0.66)
-  private let track = Color.black.opacity(0.09)
+  private let track = Color.primary.opacity(0.10)
 
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
@@ -20,12 +20,22 @@ struct CodexDashboardView: View {
       self.usageSection
       Divider()
       self.creditsSection
+      if self.quota?.freshness != .fresh
+        || self.quota.map({ self.store.now.timeIntervalSince($0.updatedAt) >= 300 }) == true
+      {
+        Text(QuotaDetailsView.freshness(self.quota, now: self.store.now))
+          .font(.caption2).foregroundStyle(.orange).padding(.bottom, 3)
+      }
     }
     .padding(.horizontal, 16)
     .padding(.vertical, 5)
     .frame(width: 300, alignment: .topLeading)
     .background(.ultraThinMaterial)
-    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    .accessibilityElement(children: .contain)
+    .accessibilityLabel("Codex 额度与本机用量")
+    .onChange(of: self.usageDays.map(\.id)) { _, ids in
+      if let pinnedDayID, !ids.contains(pinnedDayID) { self.pinnedDayID = nil }
+    }
   }
 
   private var accountHeader: some View {
@@ -78,7 +88,9 @@ struct CodexDashboardView: View {
       if let sparkSession = self.quota?.sparkSession {
         self.quotaRow(title: "Codex Spark 5 小时", window: sparkSession)
       }
-      self.quotaRow(title: "Codex Spark Weekly", window: self.quota?.sparkWeekly)
+      if let sparkWeekly = self.quota?.sparkWeekly {
+        self.quotaRow(title: "Codex Spark Weekly", window: sparkWeekly)
+      }
     }
     .padding(.vertical, 4)
   }
@@ -107,10 +119,10 @@ struct CodexDashboardView: View {
       ZStack(alignment: .leading) {
         Capsule()
           .fill(self.track)
-        if let window {
+        if let window, window.isValid, window.remainingPercent > 0 {
           Capsule()
             .fill(self.accent)
-            .frame(width: max(3, geometry.size.width * window.remainingPercent / 100))
+            .frame(width: geometry.size.width * window.remainingPercent / 100)
         }
       }
     }
@@ -120,7 +132,7 @@ struct CodexDashboardView: View {
   private var usageSection: some View {
     VStack(alignment: .leading, spacing: 6) {
       HStack(alignment: .firstTextBaseline) {
-        Text("用量仪表盘")
+        Text("本机用量")
           .font(.subheadline.weight(.medium))
         Spacer(minLength: 8)
         if self.store.isLoadingLocalUsage {
@@ -130,13 +142,17 @@ struct CodexDashboardView: View {
       }
 
       HStack(spacing: 12) {
-        self.metric(title: "今日", value: Self.money(self.usage?.sessionCostUSD))
-        self.metric(title: "30d", value: Self.money(self.usage?.last30DaysCostUSD))
+        self.metric(
+          title: "今日", value: Self.money(self.usage?.today(now: self.store.now)?.totalCost))
+        self.metric(title: "30 天估算", value: Self.money(self.usage?.totalCost(now: self.store.now)))
       }
 
       HStack(spacing: 12) {
-        self.metric(title: "最近 Token", value: Self.tokens(self.usage?.sessionTokens))
-        self.metric(title: "近 30 天 Token", value: Self.tokens(self.usage?.last30DaysTokens))
+        self.metric(
+          title: "今日 Token", value: Self.tokens(self.usage?.today(now: self.store.now)?.totalTokens)
+        )
+        self.metric(
+          title: "近 30 天 Token", value: Self.tokens(self.usage?.totalTokens(now: self.store.now)))
       }
 
       if !self.usageDays.isEmpty {
@@ -153,7 +169,7 @@ struct CodexDashboardView: View {
       }
 
       HStack(alignment: .firstTextBaseline) {
-        Text("最常用模型")
+        Text("费用最高模型")
           .foregroundStyle(.secondary)
         Spacer(minLength: 8)
         Text(self.usage?.topModel ?? "--")
@@ -162,7 +178,7 @@ struct CodexDashboardView: View {
       }
       .font(.caption)
 
-      Text("根据本机 Token 用量估算，不是订阅账单")
+      Text(self.usage?.hasPartialPricing == true ? "本机全部账号 · 部分价格缺失，费用不完整" : "本机全部账号 · 估算费用，不是订阅账单")
         .font(.caption2)
         .foregroundStyle(.secondary)
 
@@ -177,7 +193,7 @@ struct CodexDashboardView: View {
   }
 
   private var usageDays: [CodexLocalUsageSnapshot.DailyEntry] {
-    Array(self.usage?.daily.suffix(30) ?? [])
+    self.usage?.calendarDays(now: self.store.now) ?? []
   }
 
   private var selectedUsageDay: CodexLocalUsageSnapshot.DailyEntry? {
@@ -194,9 +210,26 @@ struct CodexDashboardView: View {
         )
         .foregroundStyle(self.barColor(for: day))
         .cornerRadius(2)
+        if day.totalCost == nil {
+          PointMark(x: .value("日期", day.date), y: .value("估算费用", 0))
+            .symbol(.cross).symbolSize(10).foregroundStyle(Color.secondary.opacity(0.5))
+        } else if day.totalCost == 0 {
+          PointMark(x: .value("日期", day.date), y: .value("估算费用", 0))
+            .symbol(.square).symbolSize(3).foregroundStyle(self.accent.opacity(0.5))
+        }
       }
       .chartXAxis(.hidden)
       .chartYAxis(.hidden)
+      .accessibilityRepresentation {
+        VStack {
+          ForEach(self.usageDays) { day in
+            Button("\(day.date)，\(Self.tokens(day.totalTokens)) Token，\(Self.money(day.totalCost))")
+            {
+              self.selectDay(day.id)
+            }
+          }
+        }
+      }
       .chartOverlay { chartProxy in
         GeometryReader { geometry in
           Rectangle()
@@ -226,8 +259,7 @@ struct CodexDashboardView: View {
                     self.pinnedDayID = nil
                     return
                   }
-                  self.pinnedDayID = self.pinnedDayID == dayID ? nil : dayID
-                  self.hoveredDayID = dayID
+                  self.selectDay(dayID)
                 })
         }
       }
@@ -238,12 +270,12 @@ struct CodexDashboardView: View {
         self.usageTooltip(for: selectedDay)
           .position(
             x: self.tooltipX(for: dayIndex),
-            y: 17
+            y: 26
           )
           .allowsHitTesting(false)
       }
     }
-    .frame(height: 44)
+    .frame(height: 54)
     .animation(.easeOut(duration: 0.14), value: self.hoveredDayID)
     .animation(.easeOut(duration: 0.14), value: self.pinnedDayID)
   }
@@ -253,6 +285,11 @@ struct CodexDashboardView: View {
       return self.accent.opacity(0.72)
     }
     return self.accent.opacity(day.id == selectedID ? 0.95 : 0.32)
+  }
+
+  private func selectDay(_ dayID: String) {
+    self.pinnedDayID = self.pinnedDayID == dayID ? nil : dayID
+    self.hoveredDayID = dayID
   }
 
   private func dayID(
@@ -280,15 +317,15 @@ struct CodexDashboardView: View {
 
   private func usageTooltip(for day: CodexLocalUsageSnapshot.DailyEntry) -> some View {
     VStack(alignment: .leading, spacing: 1) {
-      Text(Self.dayDate(day.date))
-        .font(.system(size: 8.5, weight: .semibold))
+      Text((self.pinnedDayID == day.id ? "固定 · " : "") + Self.dayDate(day.date))
+        .font(.system(size: 10, weight: .semibold))
       HStack(spacing: 3) {
         Text("Token")
           .foregroundStyle(.secondary)
         Spacer(minLength: 2)
         Text(Self.tokens(day.totalTokens))
       }
-      .font(.system(size: 8.5))
+      .font(.system(size: 10))
       if let totalCost = day.totalCost {
         HStack(spacing: 3) {
           Text("费用")
@@ -296,11 +333,13 @@ struct CodexDashboardView: View {
           Spacer(minLength: 2)
           Text(Self.money(totalCost))
         }
-        .font(.system(size: 8.5))
+        .font(.system(size: 10))
+      } else {
+        Text("费用未知").font(.system(size: 10)).foregroundStyle(.secondary)
       }
       if let model = Self.topModel(for: day) {
         Text(model)
-          .font(.system(size: 8.5))
+          .font(.system(size: 10))
           .lineLimit(1)
           .truncationMode(.middle)
       }
@@ -329,48 +368,23 @@ struct CodexDashboardView: View {
 
   private var creditsSection: some View {
     VStack(alignment: .leading, spacing: 5) {
-      if let creditsRemaining = self.quota?.creditsRemaining {
-        Text("额度")
-          .font(.subheadline.weight(.medium))
-        self.creditsBar(creditsRemaining)
-        HStack(alignment: .firstTextBaseline) {
-          Text("\(Self.creditValue(creditsRemaining)) 剩余")
-            .font(.caption.weight(.medium))
-          Spacer(minLength: 8)
-          Text("1K token")
-            .font(.caption2)
-            .foregroundStyle(.secondary)
-        }
-
-        if self.quota?.resetCredits?.availableCount ?? 0 > 0 {
-          self.resetCreditsRow
-        }
-      } else {
-        self.resetCreditsRow
+      HStack {
+        Text("积分余额").font(.subheadline.weight(.medium))
+        Spacer()
+        Text(
+          self.quota?.creditsUnlimited == true
+            ? "无限" : self.quota?.creditsRemaining.map(Self.creditValue) ?? "未提供"
+        )
+        .font(.caption.monospacedDigit())
       }
+      self.resetCreditsRow
     }
     .padding(.vertical, 5)
   }
 
-  private func creditsBar(_ remaining: Double) -> some View {
-    GeometryReader { geometry in
-      ZStack(alignment: .leading) {
-        Capsule()
-          .fill(self.track)
-        Capsule()
-          .fill(self.accent)
-          .frame(
-            width: max(
-              3,
-              geometry.size.width * min(100, max(0, remaining / 1_000 * 100)) / 100))
-      }
-    }
-    .frame(height: 5)
-  }
-
   private var resetCreditsRow: some View {
     HStack(alignment: .firstTextBaseline) {
-      Label("额外额度", systemImage: "plus.circle")
+      Label("可用重置", systemImage: "arrow.counterclockwise.circle")
         .font(.subheadline.weight(.medium))
       Spacer(minLength: 8)
       Text(self.resetCreditsText)
@@ -393,24 +407,14 @@ struct CodexDashboardView: View {
   }
 
   private var effectiveSubscription: CodexSubscriptionMetadata? {
-    if let subscription = self.store.subscription {
-      return subscription
-    }
-    guard
-      let activeUntil = self.quota?.subscriptionRenewsAt ?? self.quota?.subscriptionExpiresAt
-    else {
-      return nil
-    }
-    return CodexSubscriptionMetadata(
-      activeStart: nil,
-      activeUntil: activeUntil,
-      lastChecked: self.quota?.updatedAt,
-      source: .quotaFallback,
-      freshness: self.quota?.freshness == .fresh ? .fresh : .cached)
+    self.store.effectiveSubscription
   }
 
   private var subscriptionPeriodText: String {
     guard let subscription = self.effectiveSubscription else { return "订阅周期未知" }
+    if !subscription.isVerified(now: self.store.now) {
+      return subscription.activeUntil.map { "记录有效至 \(Self.subscriptionDate($0))" } ?? "订阅周期未知"
+    }
     if let activeStart = subscription.activeStart, let activeUntil = subscription.activeUntil {
       return "本期 \(Self.subscriptionDate(activeStart))–\(Self.subscriptionDate(activeUntil))"
     }
@@ -425,22 +429,22 @@ struct CodexDashboardView: View {
 
   private var subscriptionRemainingText: String {
     guard let subscription = self.effectiveSubscription else { return "日期未知" }
-    switch subscription.status() {
+    switch subscription.status(now: self.store.now) {
     case .expired:
       return "已到期"
     case .expiresToday:
       return "今日到期"
     case .active, .expiringSoon:
-      guard let days = subscription.daysRemaining() else { return "日期未知" }
+      guard let days = subscription.daysRemaining(now: self.store.now) else { return "日期未知" }
       return "剩余\(days)天"
     case .unknown:
-      return "日期未知"
+      return subscription.verificationText(now: self.store.now)
     }
   }
 
   private var subscriptionColor: Color {
     guard let subscription = self.effectiveSubscription else { return .secondary }
-    switch subscription.status() {
+    switch subscription.status(now: self.store.now) {
     case .active:
       return self.accent
     case .expiringSoon, .expiresToday:
@@ -453,7 +457,10 @@ struct CodexDashboardView: View {
   }
 
   private var resetCreditsText: String {
-    guard let credits = self.quota?.resetCredits else { return "--" }
+    guard let credits = self.quota?.resetCredits else { return "未知" }
+    if credits.expirationDates.contains(where: { $0 <= self.store.now }) {
+      return "\(credits.availableCount) 次 · 待核对"
+    }
     return "\(credits.availableCount) 次"
   }
 
@@ -463,15 +470,15 @@ struct CodexDashboardView: View {
   }
 
   private func resetText(_ window: QuotaWindow?) -> String {
-    ResetTimeFormatter.string(window, now: Date())
+    ResetTimeFormatter.string(window, now: self.store.now)
   }
 
   private var updatedText: String {
     guard let updatedAt = self.quota?.updatedAt else { return "等待首次同步" }
-    return RelativeTimeFormatter.string(from: updatedAt, to: Date()) + "更新"
+    return RelativeTimeFormatter.string(from: updatedAt, to: self.store.now) + "更新"
   }
 
-  static func money(_ value: Double?) -> String {
+  nonisolated static func money(_ value: Double?) -> String {
     guard let value, value.isFinite else { return "--" }
     let formatter = NumberFormatter()
     formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -480,7 +487,7 @@ struct CodexDashboardView: View {
     return "US$\(formatter.string(from: NSNumber(value: value)) ?? "--")"
   }
 
-  static func creditValue(_ value: Double) -> String {
+  nonisolated static func creditValue(_ value: Double) -> String {
     guard value.isFinite else { return "--" }
     let formatter = NumberFormatter()
     formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -489,7 +496,7 @@ struct CodexDashboardView: View {
     return formatter.string(from: NSNumber(value: value)) ?? "--"
   }
 
-  static func subscriptionDate(_ value: Date) -> String {
+  nonisolated static func subscriptionDate(_ value: Date) -> String {
     let formatter = DateFormatter()
     formatter.locale = Locale(identifier: "en_US_POSIX")
     formatter.calendar = Calendar(identifier: .gregorian)
@@ -497,7 +504,7 @@ struct CodexDashboardView: View {
     return formatter.string(from: value)
   }
 
-  static func dayDate(_ value: String) -> String {
+  nonisolated static func dayDate(_ value: String) -> String {
     let parser = DateFormatter()
     parser.locale = Locale(identifier: "en_US_POSIX")
     parser.calendar = Calendar(identifier: .gregorian)
@@ -506,7 +513,7 @@ struct CodexDashboardView: View {
     return self.subscriptionDate(date)
   }
 
-  static func topModel(for day: CodexLocalUsageSnapshot.DailyEntry) -> String? {
+  nonisolated static func topModel(for day: CodexLocalUsageSnapshot.DailyEntry) -> String? {
     if let breakdown = day.modelBreakdowns?.max(by: { lhs, rhs in
       if lhs.cost == rhs.cost {
         return (lhs.totalTokens ?? 0) < (rhs.totalTokens ?? 0)
@@ -518,7 +525,7 @@ struct CodexDashboardView: View {
     return day.modelsUsed?.first
   }
 
-  static func tokens(_ value: Int?) -> String {
+  nonisolated static func tokens(_ value: Int?) -> String {
     guard let value else { return "--" }
     if value >= 1_000_000_000 {
       return String(format: "%.1fB", Double(value) / 1_000_000_000)

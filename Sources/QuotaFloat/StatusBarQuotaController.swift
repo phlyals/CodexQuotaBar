@@ -3,6 +3,17 @@ import Combine
 import CoreText
 import SwiftUI
 
+private struct DashboardMenuSurface: View {
+  @ObservedObject var store: CodexDashboardStore
+  var body: some View {
+    ScrollView(.vertical) {
+      CodexDashboardView(store: store)
+    }
+    .scrollIndicators(.automatic)
+    .frame(width: 300, height: 430, alignment: .top)
+  }
+}
+
 struct StatusBarQuotaDisplay: Equatable {
   let sessionLine: String
   let weeklyLine: String
@@ -68,9 +79,9 @@ enum StatusBarQuotaFormatter {
     case .authRequired, .unavailable:
       return 0
     case .stale:
-      return snapshot.session?.remainingPercent
+      return snapshot.session?.remainingPercent ?? snapshot.weekly?.remainingPercent
     case .fresh, .cached:
-      return snapshot.session?.remainingPercent
+      return snapshot.session?.remainingPercent ?? snapshot.weekly?.remainingPercent
     }
   }
 
@@ -80,7 +91,7 @@ enum StatusBarQuotaFormatter {
 }
 
 @MainActor
-final class StatusBarQuotaController: NSObject {
+final class StatusBarQuotaController: NSObject, NSMenuDelegate {
   private let store: QuotaStore
   private let accountManager: CodexAccountManager
   private let dashboardStore: CodexDashboardStore
@@ -89,26 +100,55 @@ final class StatusBarQuotaController: NSObject {
   private let statusItem: NSStatusItem
   private let statusView = StatusBarQuotaView()
   private var cancellables: Set<AnyCancellable> = []
+  private var assistant: QuotaAssistantModel!
+  private var dashboardHostingView: NSHostingView<DashboardMenuSurface>!
+  private let dashboardMenuItem = NSMenuItem(title: "Codex 额度概览", action: nil, keyEquivalent: "")
+  private var detailHostingViews: [QuotaMenuPage: NSHostingView<QuotaDetailsView>] = [:]
+  private var detailMenuItems: [QuotaMenuPage: NSMenuItem] = [:]
+  private var menuIsOpen = false
+  private var wakeObserver: NSObjectProtocol?
 
   init(
     store: QuotaStore,
     accountManager: CodexAccountManager,
     launchAtLoginController: LaunchAtLoginController = LaunchAtLoginController(),
+    assistant: QuotaAssistantModel? = nil,
+    startsAutomatically: Bool = true,
     onAuthMutation: @escaping @MainActor () -> Void = {}
   ) {
     self.store = store
     self.accountManager = accountManager
     self.onAuthMutation = onAuthMutation
-    self.dashboardStore = CodexDashboardStore(
-      quotaStore: store,
-      accountManager: accountManager)
+    self.dashboardStore =
+      assistant?.dashboard
+      ?? CodexDashboardStore(
+        quotaStore: store,
+        accountManager: accountManager)
     self.launchAtLoginController = launchAtLoginController
     self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     super.init()
+    self.assistant =
+      assistant ?? QuotaAssistantModel(dashboard: self.dashboardStore, accounts: accountManager)
+    self.dashboardHostingView = NSHostingView(
+      rootView: DashboardMenuSurface(store: self.dashboardStore))
+    self.dashboardMenuItem.view = self.dashboardHostingView
+    self.dashboardMenuItem.setAccessibilityChildren([self.dashboardHostingView!])
+    self.dashboardMenuItem.isEnabled = true
     self.configureButton()
     self.observeStore()
     self.update()
-    self.dashboardStore.refreshLocalUsage()
+    guard startsAutomatically else { return }
+    self.dashboardStore.start()
+    self.wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+      forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+    ) { [weak self] _ in
+      Task { @MainActor in
+        self?.accountManager.reload()
+        self?.store.refresh()
+        self?.dashboardStore.refreshLocalUsage(force: true)
+        self?.assistant.signals.tick()
+      }
+    }
   }
 
   private func configureButton() {
@@ -123,7 +163,7 @@ final class StatusBarQuotaController: NSObject {
   private func observeStore() {
     self.store.$snapshots
       .combineLatest(self.store.$isRefreshing)
-      .receive(on: RunLoop.main)
+      .receive(on: DispatchQueue.main)
       .sink { [weak self] _ in
         self?.update()
       }
@@ -134,12 +174,12 @@ final class StatusBarQuotaController: NSObject {
         self.accountManager.$isBusy,
         self.accountManager.$currentSystemEmail
       )
-      .receive(on: RunLoop.main)
+      .receive(on: DispatchQueue.main)
       .sink { [weak self] _ in self?.update() }
       .store(in: &self.cancellables)
 
     self.accountManager.$currentSubscription
-      .receive(on: RunLoop.main)
+      .receive(on: DispatchQueue.main)
       .sink { [weak self] _ in self?.update() }
       .store(in: &self.cancellables)
   }
@@ -149,24 +189,43 @@ final class StatusBarQuotaController: NSObject {
     self.statusView.update(
       StatusBarQuotaFormatter.display(for: snapshot, isRefreshing: self.store.isRefreshing))
     self.statusItem.button?.image = self.statusView.renderedImage()
-    self.statusItem.menu = self.makeMenu(snapshot: snapshot)
+    self.statusItem.button?.toolTip = StatusBarQuotaFormatter.detailLines(for: snapshot).joined(
+      separator: "\n")
+    if !self.menuIsOpen { self.statusItem.menu = self.makeMenu(snapshot: snapshot) }
   }
 
-  private func makeMenu(snapshot: QuotaSnapshot?) -> NSMenu {
+  func menuWillOpen(_ menu: NSMenu) {
+    self.menuIsOpen = true
+    self.dashboardStore.tick(menuOpened: true)
+    Task { [weak self] in await self?.assistant.notifications.refreshPermission() }
+  }
+
+  func menuDidClose(_ menu: NSMenu) {
+    self.menuIsOpen = false
+    Task { @MainActor [weak self] in
+      await Task.yield()
+      self?.update()
+    }
+  }
+
+  func stop() {
+    self.assistant.stop()
+    if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
+    self.cancellables.removeAll()
+    self.statusItem.menu = nil
+    NSStatusBar.system.removeStatusItem(self.statusItem)
+  }
+
+  func makeMenu(snapshot: QuotaSnapshot?) -> NSMenu {
     let menu = NSMenu()
+    menu.delegate = self
     menu.autoenablesItems = false
     menu.minimumWidth = 300
 
-    let dashboardItem = NSMenuItem()
-    let dashboardView = CodexDashboardView(store: self.dashboardStore)
-    let hostingView = NSHostingView(rootView: dashboardView)
-    hostingView.frame = NSRect(x: 0, y: 0, width: 300, height: 1)
-    hostingView.layoutSubtreeIfNeeded()
-    let fittedHeight = ceil(hostingView.fittingSize.height)
-    hostingView.frame.size = NSSize(width: 300, height: max(1, min(450, fittedHeight)))
-    dashboardItem.view = hostingView
-    dashboardItem.isEnabled = true
-    menu.addItem(dashboardItem)
+    // Keep each host bound to one item: deallocating an old owner detaches even a reused view.
+    self.dashboardMenuItem.menu?.removeItem(self.dashboardMenuItem)
+    self.dashboardHostingView.frame = NSRect(x: 0, y: 0, width: 300, height: 430)
+    menu.addItem(self.dashboardMenuItem)
 
     menu.addItem(.separator())
 
@@ -175,7 +234,13 @@ final class StatusBarQuotaController: NSObject {
     menu.addItem(accountHeader)
 
     for account in self.accountManager.accounts {
-      let label = Self.accountMenuLabel(for: account)
+      let subscriptionSnapshot =
+        snapshot?.accountKey == account.accountKey
+        ? snapshot : account.accountKey.flatMap { assistant.history.archive.latest[$0] }
+      let subscription = CodexSubscriptionCheck.resolve(
+        record: account.subscription, snapshot: subscriptionSnapshot, accountKey: account.accountKey
+      )
+      let label = Self.accountMenuLabel(for: account, subscription: subscription)
       let item = NSMenuItem(
         title: label,
         action: #selector(self.switchAccount(_:)),
@@ -184,7 +249,7 @@ final class StatusBarQuotaController: NSObject {
       item.representedObject = account.id.uuidString
       item.state = account.isCurrentSystemAccount ? .on : .off
       item.isEnabled = !self.accountManager.isBusy && !account.isCurrentSystemAccount
-      item.toolTip = Self.accountMenuTooltip(for: account)
+      item.toolTip = Self.accountMenuTooltip(for: account, subscription: subscription)
       menu.addItem(item)
     }
 
@@ -216,6 +281,13 @@ final class StatusBarQuotaController: NSObject {
 
     menu.addItem(.separator())
 
+    menu.addItem(self.detailMenuItem(.planning))
+    menu.addItem(self.detailMenuItem(.messages))
+    menu.addItem(self.detailMenuItem(.overview))
+    menu.addItem(self.detailMenuItem(.accounts))
+    menu.addItem(self.detailMenuItem(.settings))
+    menu.addItem(.separator())
+
     let refreshItem = NSMenuItem(
       title: self.store.isRefreshing ? "正在刷新…" : "立即刷新",
       action: #selector(self.refresh),
@@ -225,7 +297,7 @@ final class StatusBarQuotaController: NSObject {
     menu.addItem(refreshItem)
 
     let loginItem = NSMenuItem(
-      title: "开机自启动",
+      title: self.launchAtLoginController.requiresApproval ? "开机自启动（待系统批准）" : "开机自启动",
       action: #selector(self.toggleLaunchAtLogin),
       keyEquivalent: "")
     loginItem.target = self
@@ -244,28 +316,119 @@ final class StatusBarQuotaController: NSObject {
     return menu
   }
 
-  private static func accountMenuLabel(for account: CodexManagedAccountViewModel) -> String {
-    let dateText = Self.subscriptionShortText(account.subscription)
+  private func detailMenuItem(_ page: QuotaMenuPage) -> NSMenuItem {
+    let item = NSMenuItem(title: page.title, action: nil, keyEquivalent: "")
+    let submenu = NSMenu(title: page.title)
+    submenu.autoenablesItems = false
+    let height = min(
+      page.preferredHeight, max(180, (NSScreen.main?.visibleFrame.height ?? 700) - 80))
+    let host: NSHostingView<QuotaDetailsView>
+    if let existing = self.detailHostingViews[page] {
+      host = existing
+      host.rootView.height = height
+    } else {
+      host = NSHostingView(
+        rootView: QuotaDetailsView(
+          model: self.assistant, page: page, height: height,
+          onExport: { [weak self] text in self?.exportDiagnostic(text) },
+          beforeNotificationPermission: { [weak self] in
+            await self?.prepareForNotificationPermission()
+          },
+          onNotificationSettings: { [weak self] in self?.openNotificationSettings() }))
+      self.detailHostingViews[page] = host
+    }
+    let content: NSMenuItem
+    if let existing = self.detailMenuItems[page] {
+      content = existing
+    } else {
+      content = NSMenuItem(title: page.title, action: nil, keyEquivalent: "")
+      content.view = host
+      content.setAccessibilityChildren([host])
+      content.isEnabled = true
+      self.detailMenuItems[page] = content
+    }
+    content.menu?.removeItem(content)
+    host.frame = NSRect(x: 0, y: 0, width: 300, height: height)
+    submenu.addItem(content)
+    item.submenu = submenu
+    return item
+  }
+
+  func showMenu() {
+    Self.scheduleMenuPresentation { [weak self] in
+      self?.statusItem.button?.performClick(nil)
+    }
+  }
+
+  static func scheduleMenuPresentation(_ present: @escaping @MainActor () -> Void) {
+    // Menu tracking must not hold a main-queue job open while controls await that same queue.
+    RunLoop.main.perform(inModes: [.default]) {
+      MainActor.assumeIsolated { present() }
+    }
+  }
+
+  private func prepareForNotificationPermission() async {
+    self.statusItem.menu?.cancelTracking()
+    await withCheckedContinuation { continuation in
+      DispatchQueue.main.async {
+        NSApp.activate(ignoringOtherApps: true)
+        continuation.resume()
+      }
+    }
+  }
+
+  private func openNotificationSettings() {
+    self.statusItem.menu?.cancelTracking()
+    DispatchQueue.main.async {
+      guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.notifications")
+      else { return }
+      NSWorkspace.shared.open(url)
+    }
+  }
+
+  private func exportDiagnostic(_ text: String) {
+    self.statusItem.menu?.cancelTracking()
+    DispatchQueue.main.async { [weak self] in
+      let panel = NSSavePanel()
+      panel.nameFieldStringValue = "codex-quota-diagnostics.json"
+      guard panel.runModal() == .OK, let url = panel.url else { return }
+      do {
+        try Data(text.utf8).write(to: url, options: .atomic)
+      } catch {
+        self?.showAccountError(title: "无法导出诊断", error: error)
+      }
+    }
+  }
+
+  private static func accountMenuLabel(
+    for account: CodexManagedAccountViewModel, subscription: CodexSubscriptionMetadata?
+  ) -> String {
+    let dateText = Self.subscriptionShortText(subscription)
     let workspace = account.workspaceLabel.map { " · \($0)" } ?? ""
     let maxEmailLength = workspace.isEmpty ? 25 : 19
     let email = Self.compactEmail(account.email, maxLength: maxEmailLength)
     return "\(email)\(workspace) · \(dateText)"
   }
 
-  private static func accountMenuTooltip(for account: CodexManagedAccountViewModel) -> String {
+  private static func accountMenuTooltip(
+    for account: CodexManagedAccountViewModel, subscription: CodexSubscriptionMetadata?
+  ) -> String {
     var lines = [account.email]
     if let workspaceLabel = account.workspaceLabel, !workspaceLabel.isEmpty {
       lines.append("Workspace：\(workspaceLabel)")
     }
-    if let subscription = account.subscription {
+    if let subscription {
       if let activeStart = subscription.activeStart {
         lines.append("本期开始：\(Self.subscriptionDate(activeStart))")
       }
       if let activeUntil = subscription.activeUntil {
-        lines.append("有效至：\(Self.subscriptionDate(activeUntil))")
+        lines.append(
+          "有效至：\(QuotaDetailsView.date(activeUntil))（\(subscription.verificationText())）")
       }
       if let lastChecked = subscription.lastChecked {
-        lines.append("最后核验：\(Self.subscriptionDateTime(lastChecked))")
+        lines.append(
+          "\(subscription.source == .idToken ? "登录声明时间" : "接口核验时间")：\(Self.subscriptionDateTime(lastChecked))"
+        )
       }
     } else {
       lines.append("订阅日期未知")
@@ -275,6 +438,7 @@ final class StatusBarQuotaController: NSObject {
 
   private static func subscriptionShortText(_ subscription: CodexSubscriptionMetadata?) -> String {
     guard let subscription else { return "日期未知" }
+    guard subscription.isVerified() else { return subscription.verificationText() }
     switch subscription.status() {
     case .expired:
       return "已到期"
@@ -413,6 +577,10 @@ final class StatusBarQuotaController: NSObject {
   }
 
   @objc private func toggleLaunchAtLogin() {
+    if self.launchAtLoginController.requiresApproval {
+      self.launchAtLoginController.openSystemSettings()
+      return
+    }
     do {
       _ = try self.launchAtLoginController.toggle()
       self.update()

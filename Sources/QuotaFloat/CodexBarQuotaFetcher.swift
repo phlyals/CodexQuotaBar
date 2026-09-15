@@ -18,90 +18,112 @@ enum QuotaFetchError: LocalizedError, Sendable {
 
 struct CodexBarQuotaFetcher: QuotaFetching {
   private let baseEnvironment: [String: String]
-  private let browserDetection: BrowserDetection
-  private let codexFetcher: UsageFetcher
-  private let claudeFetcher: ClaudeUsageFetcher
-  private let settings: ProviderSettingsSnapshot
 
   init(environment: [String: String] = ProcessInfo.processInfo.environment) {
-    let browserDetection = BrowserDetection()
     self.baseEnvironment = environment
-    self.browserDetection = browserDetection
-    self.codexFetcher = UsageFetcher(environment: environment)
-    self.claudeFetcher = ClaudeUsageFetcher(
-      browserDetection: browserDetection,
-      environment: environment,
-      runtime: .app,
-      dataSource: .auto,
-      useWebExtras: false)
-    self.settings = ProviderSettingsSnapshot.make(
-      codex: .init(
-        usageDataSource: .auto,
-        cookieSource: .off,
-        manualCookieHeader: nil),
-      claude: .init(
-        usageDataSource: .auto,
-        webExtrasEnabled: false,
-        cookieSource: .off,
-        manualCookieHeader: nil),
-      kimi: .init(
-        cookieSource: .off,
-        manualCookieHeader: nil))
   }
 
   func fetch(_ provider: QuotaProvider) async throws -> QuotaSnapshot {
     let environment = self.baseEnvironment
-    let context = ProviderFetchContext(
-      runtime: .app,
-      sourceMode: .auto,
-      includeCredits: true,
-      includeOptionalUsage: provider == .codex,
-      webTimeout: 30,
-      webDebugDumpHTML: false,
-      verbose: false,
-      env: environment,
-      settings: self.settings,
-      fetcher: self.codexFetcher,
-      claudeFetcher: self.claudeFetcher,
-      browserDetection: self.browserDetection,
-      costUsageHistoryDays: 30,
-      persistsCLISessions: false)
-
-    let definition = provider.definition
-    let descriptor = ProviderDescriptorRegistry.descriptor(for: definition.coreProvider)
-    let result = try await descriptor.fetch(context: context)
-
-    let windows = Self.mapWindows(result.usage, definition: definition)
-    let sparkWindows = Self.mapSparkWindows(result.usage)
-    let creditsRemaining = result.credits?.remaining ?? result.dashboard?.creditsRemaining
-    let creditsUpdatedAt = result.credits?.updatedAt ?? result.dashboard?.updatedAt
-    guard
-      windows.session != nil
-        || windows.weekly != nil
-        || sparkWindows.session != nil
-        || sparkWindows.weekly != nil
-        || creditsRemaining != nil
+    let authURL = CodexAuthIdentityReader.defaultAuthFileURL(environment: environment)
+    let reader = CodexAuthIdentityReader(fileURL: authURL)
+    guard let initialState = reader.readState(), let accountKey = initialState.identity?.cacheKey
     else {
-      throw QuotaFetchError.noQuotaWindows(provider)
+      throw CodexOAuthCredentialsError.missingTokens
     }
+    var credentials = try CodexOAuthCredentialsStore.load(env: environment)
+    var didRefresh = false
+    var fingerprint = initialState.fingerprint
+    if credentials.needsRefresh, !credentials.refreshToken.isEmpty {
+      credentials = try await CodexTokenRefresher.refresh(credentials)
+      try Task.checkCancellation()
+      // Never write refreshed credentials over an externally switched or rotated login.
+      try await Self.persistRefreshedCredentials(
+        credentials, authURL: authURL, expectedFingerprint: fingerprint, expectedKey: accountKey)
+      fingerprint = reader.readState()?.fingerprint
+      didRefresh = true
+    }
+    let response: CodexUsageResponse
+    do {
+      response = try await CodexOAuthUsageFetcher.fetchUsage(
+        accessToken: credentials.accessToken, accountId: credentials.accountId, env: environment)
+    } catch CodexOAuthFetchError.unauthorized where !didRefresh && !credentials.refreshToken.isEmpty
+    {
+      guard reader.readState()?.fingerprint == fingerprint else { throw CancellationError() }
+      credentials = try await CodexTokenRefresher.refresh(credentials)
+      try Task.checkCancellation()
+      try await Self.persistRefreshedCredentials(
+        credentials, authURL: authURL, expectedFingerprint: fingerprint, expectedKey: accountKey)
+      response = try await CodexOAuthUsageFetcher.fetchUsage(
+        accessToken: credentials.accessToken, accountId: credentials.accountId, env: environment)
+    }
+    let resets = try? await CodexOAuthUsageFetcher.fetchRateLimitResetCredits(
+      accessToken: credentials.accessToken, accountId: credentials.accountId, env: environment)
+    try Task.checkCancellation()
+    guard reader.read()?.cacheKey == accountKey else { throw CancellationError() }
+    var snapshot = try Self.mapResponse(
+      response, credentials: credentials, resets: resets, accountKey: accountKey)
+    if let accountID = credentials.accountId {
+      snapshot.subscriptionCheck = try await CodexSubscriptionFetcher.shared.fetch(
+        accessToken: credentials.accessToken, accountID: accountID, accountKey: accountKey)
+    }
+    try Task.checkCancellation()
+    guard reader.read()?.cacheKey == accountKey else { throw CancellationError() }
+    return snapshot
+  }
 
-    return QuotaSnapshot(
-      provider: provider,
-      session: windows.session,
-      weekly: windows.weekly,
+  @MainActor
+  static func persistRefreshedCredentials(
+    _ credentials: CodexOAuthCredentials, authURL: URL,
+    expectedFingerprint: String?, expectedKey: String
+  ) throws {
+    guard let expectedFingerprint, let original = try? Data(contentsOf: authURL),
+      CodexAuthFingerprint.fingerprint(data: original) == expectedFingerprint,
+      var json = try JSONSerialization.jsonObject(with: original) as? [String: Any],
+      var tokens = json["tokens"] as? [String: Any]
+    else { throw CancellationError() }
+    tokens["access_token"] = credentials.accessToken
+    tokens["refresh_token"] = credentials.refreshToken
+    if let idToken = credentials.idToken { tokens["id_token"] = idToken }
+    if let accountID = credentials.accountId { tokens["account_id"] = accountID }
+    json["tokens"] = tokens
+    json["last_refresh"] = ISO8601DateFormatter().string(from: Date())
+    let data = try JSONSerialization.data(withJSONObject: json, options: [.sortedKeys])
+    guard CodexAuthIdentityReader.identity(from: data)?.cacheKey == expectedKey,
+      (try? Data(contentsOf: authURL)) == original
+    else { throw CancellationError() }
+    try CodexAccountManager.atomicReplaceAuth(
+      data, liveHomeURL: authURL.deletingLastPathComponent(), fileManager: .default)
+  }
+
+  static func mapResponse(
+    _ response: CodexUsageResponse, credentials: CodexOAuthCredentials,
+    resets: CodexRateLimitResetCreditsSnapshot?, accountKey: String, now: Date = Date()
+  ) throws -> QuotaSnapshot {
+    let reconciled = CodexReconciledState.fromOAuth(
+      response: response, credentials: credentials, updatedAt: now)
+    let usage = reconciled?.toUsageSnapshot()
+    let sparkWindows = usage.map(Self.mapSparkWindows) ?? Self.mapStandaloneSpark(response)
+    let identity = CodexReconciledState.oauthIdentity(response: response, credentials: credentials)
+    let snapshot = QuotaSnapshot(
+      provider: .codex,
+      session: reconciled?.session.flatMap { Self.mapWindow($0, assumedMinutes: nil) },
+      weekly: reconciled?.weekly.flatMap { Self.mapWindow($0, assumedMinutes: nil) },
       sparkSession: sparkWindows.session,
       sparkWeekly: sparkWindows.weekly,
-      creditsRemaining: creditsRemaining,
-      creditsUpdatedAt: creditsUpdatedAt,
-      subscriptionExpiresAt: result.usage.subscriptionExpiresAt,
-      subscriptionRenewsAt: result.usage.subscriptionRenewsAt,
-      resetCredits: Self.mapResetCredits(result.usage.codexResetCredits),
-      accountEmail: result.usage.accountEmail(for: definition.coreProvider),
-      accountPlan: result.usage.identity(for: definition.coreProvider)?.loginMethod,
-      source: result.sourceLabel,
-      updatedAt: result.usage.updatedAt,
+      creditsRemaining: response.credits?.balance,
+      creditsUnlimited: response.credits?.unlimited,
+      creditsUpdatedAt: response.credits == nil ? nil : now,
+      resetCredits: Self.mapResetCredits(resets),
+      accountEmail: identity.accountEmail,
+      accountKey: accountKey,
+      accountPlan: identity.loginMethod,
+      source: "oauth",
+      updatedAt: now,
       freshness: .fresh,
-      message: nil)
+      message: resets == nil ? "重置券读取失败或未提供，次数未知" : nil)
+    guard snapshot.hasQuotaData else { throw QuotaFetchError.noQuotaWindows(.codex) }
+    return snapshot
   }
 
   static func mapWindows(
@@ -133,9 +155,39 @@ struct CodexBarQuotaFetcher: QuotaFetching {
         fallback: definition.weeklyFallback)
 
     return (
-      session: sessionSource.map { Self.mapWindow($0.window, assumedMinutes: $0.assumedMinutes) },
-      weekly: weeklySource.map { Self.mapWindow($0.window, assumedMinutes: $0.assumedMinutes) }
+      session: sessionSource.flatMap {
+        Self.mapWindow($0.window, assumedMinutes: $0.assumedMinutes)
+      },
+      weekly: weeklySource.flatMap { Self.mapWindow($0.window, assumedMinutes: $0.assumedMinutes) }
     )
+  }
+
+  private static func mapStandaloneSpark(_ response: CodexUsageResponse) -> (
+    session: QuotaWindow?, weekly: QuotaWindow?
+  ) {
+    let entries = (response.additionalRateLimits ?? []).filter {
+      [$0.limitName, $0.meteredFeature].compactMap { $0 }.joined(separator: " ").lowercased()
+        .contains("spark")
+    }
+    var session: QuotaWindow?
+    var weekly: QuotaWindow?
+    for entry in entries {
+      for value in [entry.rateLimit?.primaryWindow, entry.rateLimit?.secondaryWindow].compactMap({
+        $0
+      }) {
+        guard (0...100).contains(value.usedPercent), value.limitWindowSeconds > 0 else { continue }
+        let window = QuotaWindow(
+          usedPercent: Double(value.usedPercent),
+          resetsAt: value.resetAt > 0 ? Date(timeIntervalSince1970: Double(value.resetAt)) : nil,
+          windowMinutes: value.limitWindowSeconds / 60)
+        if value.limitWindowSeconds <= 6 * 3600 {
+          session = session ?? window
+        } else if value.limitWindowSeconds >= 6 * 86400 {
+          weekly = weekly ?? window
+        }
+      }
+    }
+    return (session, weekly)
   }
 
   private static func fallbackWindow(
@@ -155,10 +207,11 @@ struct CodexBarQuotaFetcher: QuotaFetching {
   private static func mapWindow(
     _ window: RateWindow,
     assumedMinutes: Int?
-  ) -> QuotaWindow {
-    QuotaWindow(
+  ) -> QuotaWindow? {
+    guard window.usedPercent.isFinite, (0...100).contains(window.usedPercent) else { return nil }
+    return QuotaWindow(
       usedPercent: window.usedPercent,
-      resetsAt: window.resetsAt,
+      resetsAt: window.resetsAt.flatMap { $0.timeIntervalSince1970 > 0 ? $0 : nil },
       windowMinutes: window.windowMinutes ?? assumedMinutes)
   }
 
@@ -211,8 +264,8 @@ struct CodexBarQuotaFetcher: QuotaFetching {
     }
 
     return (
-      session: session.map { Self.mapWindow($0.window, assumedMinutes: nil) },
-      weekly: weekly.map { Self.mapWindow($0.window, assumedMinutes: nil) }
+      session: session.flatMap { Self.mapWindow($0.window, assumedMinutes: nil) },
+      weekly: weekly.flatMap { Self.mapWindow($0.window, assumedMinutes: nil) }
     )
   }
 
@@ -230,9 +283,15 @@ struct CodexBarQuotaFetcher: QuotaFetching {
       }
       return expiresAt
     }
-    return QuotaResetCredits(
+    var result = QuotaResetCredits(
       availableCount: snapshot.availableCount,
       expirationDates: expirationDates)
+    result.details = snapshot.credits.map {
+      QuotaResetCredit(
+        id: $0.id, status: $0.status.rawValue, expiresAt: $0.expiresAt,
+        scope: $0.title ?? $0.resetType)
+    }.sorted { ($0.expiresAt ?? .distantFuture) < ($1.expiresAt ?? .distantFuture) }
+    return result
   }
 
 }

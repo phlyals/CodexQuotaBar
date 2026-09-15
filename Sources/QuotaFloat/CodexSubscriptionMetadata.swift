@@ -4,6 +4,7 @@ import Foundation
 enum CodexSubscriptionSource: String, Codable, Equatable, Sendable {
   case idToken
   case quotaFallback
+  case subscriptionAPI
 }
 
 enum CodexSubscriptionFreshness: String, Codable, Equatable, Sendable {
@@ -37,6 +38,7 @@ struct CodexSubscriptionMetadata: Codable, Equatable, Sendable {
   }
 
   func status(now: Date = Date(), calendar: Calendar = .current) -> CodexSubscriptionStatus {
+    guard self.isVerified(now: now) else { return .unknown }
     guard let activeUntil = self.activeUntil else { return .unknown }
     if activeUntil <= now { return .expired }
     if calendar.isDate(activeUntil, inSameDayAs: now) { return .expiresToday }
@@ -45,9 +47,22 @@ struct CodexSubscriptionMetadata: Codable, Equatable, Sendable {
   }
 
   func daysRemaining(now: Date = Date()) -> Int? {
+    guard self.isVerified(now: now) else { return nil }
     guard let activeUntil = self.activeUntil else { return nil }
     guard activeUntil > now else { return 0 }
     return max(1, Int(ceil(activeUntil.timeIntervalSince(now) / 86_400)))
+  }
+
+  func isVerified(now: Date = Date()) -> Bool {
+    guard self.source != .idToken, self.freshness == .fresh,
+      let lastChecked, lastChecked <= now.addingTimeInterval(60)
+    else { return false }
+    return now.timeIntervalSince(lastChecked) < 86_400
+  }
+
+  func verificationText(now: Date = Date()) -> String {
+    if isVerified(now: now) { return "已核验" }
+    return source == .idToken ? "登录记录" : "核验已过期"
   }
 }
 
@@ -139,7 +154,9 @@ enum CodexSubscriptionMetadataReader {
     let email = CodexJWTDecoder.string(from: payload?["email"])
     let identity: CodexAuthIdentity?
     if accountID != nil || email != nil {
-      identity = CodexAuthIdentity(accountID: accountID, email: email)
+      identity = CodexAuthIdentity(
+        accountID: accountID, email: email,
+        workspaceID: CodexJWTDecoder.string(from: tokens["workspace_id"] ?? auth?["workspace_id"]))
     } else {
       identity = nil
     }
@@ -172,7 +189,7 @@ enum CodexSubscriptionMetadataReader {
         activeUntil: normalizedUntil,
         lastChecked: lastChecked,
         source: .idToken,
-        freshness: .fresh)
+        freshness: .cached)
     }
 
     guard identity != nil || subscription != nil else { return nil }

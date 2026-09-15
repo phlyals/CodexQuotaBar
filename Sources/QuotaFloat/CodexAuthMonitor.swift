@@ -1,9 +1,21 @@
 import CodexBarCore
+import CryptoKit
 import Foundation
 
 struct CodexAuthIdentity: Equatable, Sendable {
   let accountID: String?
   let email: String?
+  var workspaceID: String? = nil
+
+  var cacheKey: String? {
+    guard let accountID, !accountID.isEmpty else { return nil }
+    return Self.cacheKey(accountID: accountID, workspaceID: self.workspaceID)
+  }
+
+  static func cacheKey(accountID: String, workspaceID: String? = nil) -> String {
+    let value = accountID + "\u{0}" + (workspaceID ?? accountID)
+    return SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+  }
 }
 
 struct CodexAuthIdentityReader {
@@ -73,12 +85,14 @@ final class CodexAuthMonitor {
   func start() {
     guard self.timer == nil else { return }
     self.lastState = self.reader.readState()
-    self.timer = Timer.scheduledTimer(withTimeInterval: self.interval, repeats: true) {
+    let timer = Timer(timeInterval: self.interval, repeats: true) {
       [weak self] _ in
       Task { @MainActor [weak self] in
         self?.poll()
       }
     }
+    self.timer = timer
+    RunLoop.main.add(timer, forMode: .common)
   }
 
   func stop() {
@@ -91,9 +105,16 @@ final class CodexAuthMonitor {
   }
 
   func poll() {
-    guard let state = self.reader.readState() else { return }
+    guard let state = self.reader.readState() else {
+      if self.lastState != nil {
+        self.lastState = nil
+        self.onChange(.accountChanged)
+      }
+      return
+    }
     guard let lastState = self.lastState else {
       self.lastState = state
+      self.onChange(.accountChanged)
       return
     }
     guard let change = CodexAuthChange.classify(previous: lastState, current: state) else {

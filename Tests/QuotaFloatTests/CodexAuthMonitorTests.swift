@@ -1,7 +1,31 @@
 import XCTest
+
 @testable import QuotaFloat
 
 final class CodexAuthIdentityReaderTests: XCTestCase {
+  @MainActor
+  func testFirstLoginDeletionAndRotationEmitOnce() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let url = root.appendingPathComponent("auth.json")
+    var changes: [CodexAuthChange] = []
+    let monitor = CodexAuthMonitor(reader: .init(fileURL: url), onChange: { changes.append($0) })
+    monitor.poll()
+    XCTAssertTrue(changes.isEmpty)
+    try Self.authJSON(accountID: "a", idToken: "one").write(to: url)
+    monitor.poll()
+    monitor.poll()
+    XCTAssertEqual(changes, [.accountChanged])
+    try Self.authJSON(accountID: "a", idToken: "two").write(to: url)
+    monitor.poll()
+    monitor.poll()
+    XCTAssertEqual(changes.last, .credentialsRotated)
+    try FileManager.default.removeItem(at: url)
+    monitor.poll()
+    monitor.poll()
+    XCTAssertEqual(changes, [.accountChanged, .credentialsRotated, .accountChanged])
+  }
   func testDefaultAuthURLUsesCodexHomeWhenPresent() {
     let url = CodexAuthIdentityReader.defaultAuthFileURL(
       environment: ["CODEX_HOME": "/tmp/custom-codex"])
