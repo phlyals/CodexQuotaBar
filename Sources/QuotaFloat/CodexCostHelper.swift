@@ -58,6 +58,35 @@ struct CodexLocalUsageSnapshot: Codable, Equatable, Sendable {
     }?.key
   }
 
+  /// Prefer today's primary model, falling back to the most recent active day, then 30-day topModel.
+  func activeModel(now: Date = Date(), calendar: Calendar = .current) -> String? {
+    if let today = self.today(now: now, calendar: calendar),
+      let model = Self.primaryModel(for: today)
+    {
+      return model
+    }
+    for day in self.calendarDays(now: now, calendar: calendar).reversed() {
+      if let model = Self.primaryModel(for: day) {
+        return model
+      }
+    }
+    return self.topModel
+  }
+
+  static func primaryModel(for day: DailyEntry) -> String? {
+    if let breakdowns = day.modelBreakdowns, !breakdowns.isEmpty {
+      return breakdowns.max { lhs, rhs in
+        let lTokens = lhs.totalTokens ?? 0
+        let rTokens = rhs.totalTokens ?? 0
+        if lTokens == rTokens {
+          return (lhs.cost ?? 0) < (rhs.cost ?? 0)
+        }
+        return lTokens < rTokens
+      }?.modelName
+    }
+    return day.modelsUsed?.first
+  }
+
   func calendarDays(now: Date = Date(), calendar: Calendar = .current) -> [DailyEntry] {
     let formatter = DateFormatter()
     formatter.locale = Locale(identifier: "en_US_POSIX")

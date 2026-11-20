@@ -112,4 +112,48 @@ final class StatusBarQuotaFormatterTests: XCTestCase {
     }
     XCTAssertTrue(containsWhiteTextPixel)
   }
+
+  func testDualDisplayIncludesCodexAndGoogleRemainingPercent() {
+    let codex = QuotaSnapshot(
+      provider: .codex,
+      session: QuotaWindow(usedPercent: 20, resetsAt: nil, windowMinutes: 300),
+      weekly: QuotaWindow(usedPercent: 35, resetsAt: nil, windowMinutes: 10_080),
+      resetCredits: nil,
+      accountEmail: nil,
+      source: "oauth",
+      updatedAt: Date(timeIntervalSince1970: 1_000),
+      freshness: .fresh,
+      message: nil)
+    let google = QuotaSnapshot(
+      provider: .antigravity,
+      session: QuotaWindow(usedPercent: 10, resetsAt: nil, windowMinutes: 300),
+      weekly: QuotaWindow(usedPercent: 25, resetsAt: nil, windowMinutes: 300),
+      resetCredits: nil,
+      accountEmail: "dev@example.com",
+      accountKey: "dev@example.com",
+      accountPlan: "Pro",
+      source: "app",
+      updatedAt: Date(timeIntervalSince1970: 1_000),
+      freshness: .fresh,
+      message: nil)
+
+    let display = StatusBarQuotaFormatter.display(codex: codex, google: google, isRefreshing: false)
+    XCTAssertEqual(display.sessionLine, "5h 80%")
+    XCTAssertEqual(display.weeklyLine, "W 65%")
+    XCTAssertEqual(display.googleTopLine, "5h 90%")
+    XCTAssertEqual(display.googleBottomLine, "W 75%")
+    XCTAssertEqual(display.googleIconRemainingPercent, 90)
+  }
+
+  @MainActor
+  func testStatusBarViewRendersDualImageAtDualWidth() {
+    let view = StatusBarQuotaView()
+    view.update(
+      StatusBarQuotaDisplay(
+        sessionLine: "5h 80%", weeklyLine: "W 65%", iconRemainingPercent: 80,
+        googleTopLine: "5h 90%", googleBottomLine: "W 75%", googleIconRemainingPercent: 90))
+
+    let image = view.renderedImage()
+    XCTAssertEqual(image.size, NSSize(width: StatusBarQuotaView.dualWidth, height: 22))
+  }
 }

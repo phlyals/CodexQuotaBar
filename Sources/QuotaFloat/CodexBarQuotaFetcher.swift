@@ -24,6 +24,15 @@ struct CodexBarQuotaFetcher: QuotaFetching {
   }
 
   func fetch(_ provider: QuotaProvider) async throws -> QuotaSnapshot {
+    switch provider {
+    case .codex:
+      return try await self.fetchCodex()
+    case .antigravity:
+      return try await self.fetchAntigravity()
+    }
+  }
+
+  private func fetchCodex() async throws -> QuotaSnapshot {
     let environment = self.baseEnvironment
     let authURL = CodexAuthIdentityReader.defaultAuthFileURL(environment: environment)
     let reader = CodexAuthIdentityReader(fileURL: authURL)
@@ -70,6 +79,110 @@ struct CodexBarQuotaFetcher: QuotaFetching {
     try Task.checkCancellation()
     guard reader.read()?.cacheKey == accountKey else { throw CancellationError() }
     return snapshot
+  }
+
+  private func fetchAntigravity() async throws -> QuotaSnapshot {
+    let environment = self.baseEnvironment
+    let browserDetection = BrowserDetection()
+    let context = ProviderFetchContext(
+      runtime: .app,
+      sourceMode: .auto,
+      includeCredits: false,
+      includeOptionalUsage: true,
+      webTimeout: 10,
+      webDebugDumpHTML: false,
+      verbose: false,
+      env: environment,
+      settings: nil,
+      fetcher: UsageFetcher(environment: environment),
+      claudeFetcher: ClaudeUsageFetcher(
+        browserDetection: browserDetection, environment: environment),
+      browserDetection: browserDetection,
+      persistsCLISessions: true,
+      persistentCLISessionIdleWindow: 300)
+    let result = try await AntigravityProviderDescriptor.descriptor.fetch(context: context)
+    try Task.checkCancellation()
+    return try Self.mapAntigravityUsage(result.usage, source: result.sourceLabel)
+  }
+
+  static func mapAntigravityUsage(
+    _ usage: UsageSnapshot,
+    source: String,
+    now: Date = Date()
+  ) throws -> QuotaSnapshot {
+    let rawExtras = usage.extraRateWindows ?? []
+
+    // Prefer Gemini 5h for session and Gemini Weekly for weekly (not 3P Claude/GPT).
+    let gemini5hExtra = rawExtras.first { named in
+      let id = named.id.lowercased()
+      let title = named.title.lowercased()
+      return id.contains("gemini-5h")
+        || (title.contains("gemini") && !title.contains("argon")
+          && (named.window.windowMinutes ?? 0) > 0 && (named.window.windowMinutes ?? 0) <= 6 * 60)
+    }
+    let geminiWeeklyExtra = rawExtras.first { named in
+      let id = named.id.lowercased()
+      let title = named.title.lowercased()
+      return id.contains("gemini-weekly")
+        || (title.contains("gemini") && !title.contains("argon")
+          && (named.window.windowMinutes ?? 0) >= 6 * 24 * 60)
+    }
+
+    let session =
+      (gemini5hExtra?.window ?? usage.primary).flatMap { Self.mapWindow($0, assumedMinutes: nil) }
+    let weekly =
+      (geminiWeeklyExtra?.window ?? (gemini5hExtra == nil ? usage.secondary : nil)).flatMap {
+        Self.mapWindow($0, assumedMinutes: nil)
+      }
+
+    let consumedIDs = Set([gemini5hExtra?.id, geminiWeeklyExtra?.id].compactMap { $0 })
+    let extras: [QuotaNamedWindow] = rawExtras.compactMap { named in
+      guard !consumedIDs.contains(named.id) else { return nil }
+      guard let window = Self.mapWindow(named.window, assumedMinutes: nil) else { return nil }
+      return QuotaNamedWindow(
+        id: named.id,
+        title: Self.localizedAntigravityTitle(id: named.id, rawTitle: named.title),
+        window: window)
+    }
+    let email = usage.identity?.accountEmail
+    let plan = usage.identity?.loginMethod
+    let snapshot = QuotaSnapshot(
+      provider: .antigravity,
+      session: session,
+      weekly: weekly,
+      extraWindows: extras.isEmpty ? nil : extras,
+      resetCredits: nil,
+      accountEmail: email,
+      accountKey: email ?? "antigravity",
+      accountPlan: plan,
+      source: source,
+      updatedAt: now,
+      freshness: .fresh,
+      message: nil)
+    guard snapshot.hasQuotaData else { throw QuotaFetchError.noQuotaWindows(.antigravity) }
+    return snapshot
+  }
+
+  private static func localizedAntigravityTitle(id: String, rawTitle: String) -> String {
+    let lowerID = id.lowercased()
+    let lowerTitle = rawTitle.lowercased()
+    if lowerID.contains("3p-5h")
+      || ((lowerTitle.contains("claude") || lowerTitle.contains("gpt")) && lowerTitle.contains("five hour"))
+    {
+      return "Claude / GPT 5 小时"
+    }
+    if lowerID.contains("3p-weekly")
+      || ((lowerTitle.contains("claude") || lowerTitle.contains("gpt")) && lowerTitle.contains("weekly"))
+    {
+      return "Claude / GPT 周额度"
+    }
+    if lowerTitle.contains("argon") && lowerTitle.contains("weekly") {
+      return "Gemini 4 Argon 周额度"
+    }
+    if lowerTitle.contains("argon") && lowerTitle.contains("five hour") {
+      return "Gemini 4 Argon 5 小时"
+    }
+    return rawTitle
   }
 
   @MainActor

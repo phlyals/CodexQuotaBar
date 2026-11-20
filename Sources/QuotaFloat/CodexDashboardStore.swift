@@ -4,6 +4,8 @@ import Foundation
 @MainActor
 final class CodexDashboardStore: ObservableObject {
   @Published private(set) var quota: QuotaSnapshot?
+  @Published private(set) var googleQuota: QuotaSnapshot?
+  @Published private(set) var isRefreshing = false
   @Published private(set) var currentAccountEmail: String?
   @Published private(set) var subscription: CodexSubscriptionMetadata?
   @Published private(set) var localUsage: CodexLocalUsageSnapshot?
@@ -33,12 +35,20 @@ final class CodexDashboardStore: ObservableObject {
     self.quotaStore = quotaStore
     self.localUsageFetcher = localUsageFetcher
     self.quota = quotaStore.snapshot(for: .codex)
+    self.googleQuota = quotaStore.snapshot(for: .antigravity)
+    self.isRefreshing = quotaStore.isRefreshing
     self.currentAccountEmail = accountManager?.currentSystemEmail
     self.subscription = accountManager?.currentSubscription
     quotaStore.$snapshots
-      .map { $0[.codex] }
       .receive(on: DispatchQueue.main)
-      .sink { [weak self] in self?.quota = $0 }
+      .sink { [weak self] snapshots in
+        self?.quota = snapshots[.codex]
+        self?.googleQuota = snapshots[.antigravity]
+      }
+      .store(in: &self.cancellables)
+    quotaStore.$isRefreshing
+      .receive(on: DispatchQueue.main)
+      .sink { [weak self] in self?.isRefreshing = $0 }
       .store(in: &self.cancellables)
     if let accountManager {
       accountManager.$currentSubscription

@@ -3,6 +3,7 @@ import Foundation
 
 enum QuotaProviderIcon: Sendable {
   case codex
+  case antigravity
 }
 
 enum QuotaWindowLane: Sendable {
@@ -41,7 +42,15 @@ enum QuotaProviderCatalog {
       icon: .codex,
       color: QuotaProviderColor(red: 0.42, green: 0.33, blue: 0.96),
       sessionFallback: QuotaWindowFallback(lane: .primary, assumedMinutes: 300),
-      weeklyFallback: QuotaWindowFallback(lane: .secondary, assumedMinutes: 10_080))
+      weeklyFallback: QuotaWindowFallback(lane: .secondary, assumedMinutes: 10_080)),
+    QuotaProviderDefinition(
+      id: .antigravity,
+      displayName: "Google",
+      coreProvider: .antigravity,
+      icon: .antigravity,
+      color: QuotaProviderColor(red: 0.24, green: 0.72, blue: 0.50),
+      sessionFallback: QuotaWindowFallback(lane: .primary, assumedMinutes: 300),
+      weeklyFallback: QuotaWindowFallback(lane: .secondary, assumedMinutes: 300)),
   ]
 
   private static let byID = Dictionary(uniqueKeysWithValues: Self.definitions.map { ($0.id, $0) })

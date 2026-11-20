@@ -139,8 +139,8 @@ enum QuotaFloatSelfTest {
       mapped.weekly?.windowMinutes == 10_080, "weekly-only data must stay in the weekly lane")
 
     try self.check(
-      QuotaProviderCatalog.orderedProviders == [.codex],
-      "provider catalog must remain Codex-only")
+      QuotaProviderCatalog.orderedProviders == [.codex, .antigravity],
+      "provider catalog must include Codex and Google (Antigravity)")
 
     let contentPreferences = ContentPreferences()
     try self.check(
@@ -154,7 +154,7 @@ enum QuotaFloatSelfTest {
       "collapsed mode must use the compact brand size")
     contentPreferences.expandAll()
     try self.check(
-      contentPreferences.activeProviders == Set(QuotaProviderCatalog.orderedProviders),
+      contentPreferences.activeProviders == [.codex],
       "expanding globally must restore Codex")
 
     try self.check(

@@ -33,7 +33,7 @@ final class QuotaStore: ObservableObject {
   private let staleAfter: TimeInterval
   private let identityProvider: @MainActor () -> String?
   private var failureCounts: [QuotaProvider: Int] = [:]
-  private var activeProviders = Set(QuotaProviderCatalog.orderedProviders)
+  private var activeProviders: Set<QuotaProvider> = [.codex]
   private var lastAttemptByProvider: [QuotaProvider: Date] = [:]
   private var inFlightTasks: [QuotaProvider: Task<Void, Never>] = [:]
   private var inFlightTokens: [QuotaProvider: UUID] = [:]
@@ -57,8 +57,11 @@ final class QuotaStore: ObservableObject {
 
     let now = Date()
     self.snapshots = Dictionary(
-      cacheStore.load().filter {
-        $0.accountKey != nil && $0.accountKey == identityProvider()
+      cacheStore.load().filter { snapshot in
+        if snapshot.provider == .codex {
+          return snapshot.accountKey != nil && snapshot.accountKey == identityProvider()
+        }
+        return true
       }.map { snapshot in
         (snapshot.provider, snapshot.markingCached(now: now, staleAfter: staleAfter))
       }, uniquingKeysWith: { first, second in first.updatedAt > second.updatedAt ? first : second })
@@ -122,7 +125,10 @@ final class QuotaStore: ObservableObject {
 
     let now = Date()
     for provider in providers where self.activeProviders.contains(provider) {
-      if let previous = self.snapshots[provider], previous.accountKey != self.identityProvider() {
+      if provider == .codex,
+        let previous = self.snapshots[provider],
+        previous.accountKey != self.identityProvider()
+      {
         self.cancelInFlightRefresh(provider)
         self.snapshots.removeValue(forKey: provider)
         self.lastAttemptByProvider.removeValue(forKey: provider)
@@ -148,11 +154,17 @@ final class QuotaStore: ObservableObject {
 
     self.lastAttemptByProvider[provider] = now
     self.lastRefreshAttempt = now
-    guard let accountKey = self.identityProvider() else {
-      self.snapshots.removeValue(forKey: provider)
-      self.applyFailure(provider: provider, message: "login required", now: now)
-      self.cacheStore.save([])
-      return
+    let accountKey: String?
+    if provider == .codex {
+      guard let codexKey = self.identityProvider() else {
+        self.snapshots.removeValue(forKey: provider)
+        self.applyFailure(provider: provider, message: "login required", now: now)
+        self.cacheStore.save(Array(self.snapshots.values))
+        return
+      }
+      accountKey = codexKey
+    } else {
+      accountKey = nil
     }
     self.inFlightTokens[provider] = token
     self.isRefreshing = true
@@ -185,13 +197,13 @@ final class QuotaStore: ObservableObject {
     }
   }
 
-  private func finishRefresh(_ outcome: QuotaRefreshOutcome, token: UUID, accountKey: String) {
+  private func finishRefresh(_ outcome: QuotaRefreshOutcome, token: UUID, accountKey: String?) {
     guard self.inFlightTokens[outcome.provider] == token else { return }
 
     self.inFlightTasks.removeValue(forKey: outcome.provider)
     self.inFlightTokens.removeValue(forKey: outcome.provider)
 
-    guard self.identityProvider() == accountKey else {
+    if outcome.provider == .codex, self.identityProvider() != accountKey {
       self.snapshots.removeValue(forKey: outcome.provider)
       self.lastAttemptByProvider.removeValue(forKey: outcome.provider)
       self.isRefreshing = !self.inFlightTasks.isEmpty
@@ -202,10 +214,14 @@ final class QuotaStore: ObservableObject {
     if !outcome.wasCancelled {
       let now = Date()
       if let snapshot = outcome.snapshot {
-        if snapshot.accountKey == nil || snapshot.accountKey == accountKey {
+        if outcome.provider != .codex || snapshot.accountKey == nil
+          || snapshot.accountKey == accountKey
+        {
           var updated = snapshot.replacing(
-            freshness: snapshot.freshness, message: snapshot.message, accountKey: accountKey)
-          if let check = updated.subscriptionCheck, check.metadata == nil, check.message != nil,
+            freshness: snapshot.freshness, message: snapshot.message,
+            accountKey: accountKey ?? snapshot.accountKey)
+          if outcome.provider == .codex,
+            let check = updated.subscriptionCheck, check.metadata == nil, check.message != nil,
             let previous = self.snapshots[outcome.provider], previous.accountKey == accountKey,
             let metadata = previous.subscriptionCheck?.metadata
           {
@@ -269,7 +285,9 @@ final class QuotaStore: ObservableObject {
         staleAfter: self.staleAfter)
       self.snapshots[provider] =
         Self.failureState(message) == .authRequired
-        ? retained.replacing(freshness: .authRequired, message: "登录已失效，请重新登录 Codex")
+        ? retained.replacing(
+          freshness: .authRequired,
+          message: Self.userFacingMessage(provider: provider, message: message))
         : retained
       return
     }
@@ -280,7 +298,7 @@ final class QuotaStore: ObservableObject {
       weekly: nil,
       resetCredits: nil,
       accountEmail: nil,
-      accountKey: self.identityProvider(),
+      accountKey: provider == .codex ? self.identityProvider() : "antigravity",
       source: "auto",
       updatedAt: now,
       freshness: Self.failureState(message),
@@ -297,12 +315,21 @@ final class QuotaStore: ObservableObject {
   }
 
   private static func userFacingMessage(provider: QuotaProvider, message: String) -> String {
-    _ = provider
-    return switch Self.failureState(message) {
-    case .authRequired:
-      "登录已失效，请重新登录 Codex"
-    default:
-      "额度读取失败，保留上次数据；请稍后刷新"
+    switch provider {
+    case .codex:
+      return switch Self.failureState(message) {
+      case .authRequired:
+        "登录已失效，请重新登录 Codex"
+      default:
+        "额度读取失败，保留上次数据；请稍后刷新"
+      }
+    case .antigravity:
+      return switch Self.failureState(message) {
+      case .authRequired:
+        "未检测到 Antigravity 登录状态"
+      default:
+        "Google 额度暂不可用，请确认 Antigravity 已运行或已登录"
+      }
     }
   }
 }

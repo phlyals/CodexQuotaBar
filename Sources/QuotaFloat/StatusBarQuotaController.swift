@@ -18,18 +18,75 @@ struct StatusBarQuotaDisplay: Equatable {
   let sessionLine: String
   let weeklyLine: String
   let iconRemainingPercent: Double?
+  let googleTopLine: String?
+  let googleBottomLine: String?
+  let googleIconRemainingPercent: Double?
+
+  init(
+    sessionLine: String,
+    weeklyLine: String,
+    iconRemainingPercent: Double?,
+    googleTopLine: String? = nil,
+    googleBottomLine: String? = nil,
+    googleIconRemainingPercent: Double? = nil
+  ) {
+    self.sessionLine = sessionLine
+    self.weeklyLine = weeklyLine
+    self.iconRemainingPercent = iconRemainingPercent
+    self.googleTopLine = googleTopLine
+    self.googleBottomLine = googleBottomLine
+    self.googleIconRemainingPercent = googleIconRemainingPercent
+  }
 }
 
 enum StatusBarQuotaFormatter {
   static func display(for snapshot: QuotaSnapshot?, isRefreshing: Bool) -> StatusBarQuotaDisplay {
+    self.display(codex: snapshot, google: nil, isRefreshing: isRefreshing, includeGoogle: false)
+  }
+
+  static func display(
+    codex snapshot: QuotaSnapshot?,
+    google: QuotaSnapshot?,
+    isRefreshing: Bool,
+    includeGoogle: Bool = true
+  ) -> StatusBarQuotaDisplay {
+    let googleTop: String?
+    let googleBottom: String?
+    let googlePct: Double?
+    if includeGoogle {
+      if let google, google.hasQuotaData {
+        let gPrefix: String =
+          switch google.freshness {
+          case .fresh: ""
+          case .cached: "~"
+          case .stale, .unavailable, .authRequired: "!"
+          }
+        googleTop = "\(gPrefix)5h \(Self.percent(google.session))"
+        googleBottom = "\(gPrefix)W \(Self.percent(google.weekly))"
+        googlePct = google.session?.remainingPercent ?? google.weekly?.remainingPercent
+      } else {
+        googleTop = "5h --"
+        googleBottom = "W --"
+        googlePct = nil
+      }
+    } else {
+      googleTop = nil
+      googleBottom = nil
+      googlePct = nil
+    }
+
     if isRefreshing, snapshot == nil {
       return StatusBarQuotaDisplay(
-        sessionLine: "5h --", weeklyLine: "W --", iconRemainingPercent: nil)
+        sessionLine: "5h --", weeklyLine: "W --", iconRemainingPercent: nil,
+        googleTopLine: googleTop, googleBottomLine: googleBottom,
+        googleIconRemainingPercent: googlePct)
     }
 
     guard let snapshot else {
       return StatusBarQuotaDisplay(
-        sessionLine: "5h --", weeklyLine: "W --", iconRemainingPercent: nil)
+        sessionLine: "5h --", weeklyLine: "W --", iconRemainingPercent: nil,
+        googleTopLine: googleTop, googleBottomLine: googleBottom,
+        googleIconRemainingPercent: googlePct)
     }
 
     let prefix: String
@@ -41,7 +98,10 @@ enum StatusBarQuotaFormatter {
     case .stale:
       prefix = "!"
     case .authRequired:
-      return StatusBarQuotaDisplay(sessionLine: "Codex", weeklyLine: "登录", iconRemainingPercent: 0)
+      return StatusBarQuotaDisplay(
+        sessionLine: "Codex", weeklyLine: "登录", iconRemainingPercent: 0,
+        googleTopLine: googleTop, googleBottomLine: googleBottom,
+        googleIconRemainingPercent: googlePct)
     case .unavailable:
       prefix = "!"
     }
@@ -49,22 +109,35 @@ enum StatusBarQuotaFormatter {
     return StatusBarQuotaDisplay(
       sessionLine: "\(prefix)5h \(Self.percent(snapshot.session))",
       weeklyLine: "\(prefix)W \(Self.percent(snapshot.weekly))",
-      iconRemainingPercent: Self.iconRemainingPercent(for: snapshot))
+      iconRemainingPercent: Self.iconRemainingPercent(for: snapshot),
+      googleTopLine: googleTop,
+      googleBottomLine: googleBottom,
+      googleIconRemainingPercent: googlePct)
   }
 
-  static func detailLines(for snapshot: QuotaSnapshot?) -> [String] {
-    guard let snapshot else {
-      return ["Codex：等待首次同步"]
+  static func detailLines(for snapshot: QuotaSnapshot?, google: QuotaSnapshot? = nil) -> [String] {
+    var lines: [String]
+    if let snapshot {
+      lines = [
+        "Codex 5h：\(Self.percent(snapshot.session))，\(Self.resetText(snapshot.session))",
+        "Codex 周额度：\(Self.percent(snapshot.weekly))，\(Self.resetText(snapshot.weekly))",
+        "来源：\(snapshot.source)",
+        "更新：\(RelativeTimeFormatter.string(from: snapshot.updatedAt, to: Date()))",
+      ]
+      if let message = snapshot.message {
+        lines.append(message)
+      }
+    } else {
+      lines = ["Codex：等待首次同步"]
     }
 
-    var lines = [
-      "Codex 5h：\(Self.percent(snapshot.session))，\(Self.resetText(snapshot.session))",
-      "Codex 周额度：\(Self.percent(snapshot.weekly))，\(Self.resetText(snapshot.weekly))",
-      "来源：\(snapshot.source)",
-      "更新：\(RelativeTimeFormatter.string(from: snapshot.updatedAt, to: Date()))",
-    ]
-    if let message = snapshot.message {
-      lines.append(message)
+    if let google {
+      if google.hasQuotaData {
+        lines.append("Google Gemini 5h：\(Self.percent(google.session))，\(Self.resetText(google.session))")
+        lines.append("Google Gemini 周额度：\(Self.percent(google.weekly))，\(Self.resetText(google.weekly))")
+      } else if let msg = google.message {
+        lines.append("Google：\(msg)")
+      }
     }
     return lines
   }
@@ -91,7 +164,7 @@ enum StatusBarQuotaFormatter {
 }
 
 @MainActor
-final class StatusBarQuotaController: NSObject, NSMenuDelegate {
+final class StatusBarQuotaController: NSObject, NSMenuDelegate, NSPopoverDelegate {
   private let store: QuotaStore
   private let accountManager: CodexAccountManager
   private let dashboardStore: CodexDashboardStore
@@ -101,6 +174,8 @@ final class StatusBarQuotaController: NSObject, NSMenuDelegate {
   private let statusView = StatusBarQuotaView()
   private var cancellables: Set<AnyCancellable> = []
   private var assistant: QuotaAssistantModel!
+  private var popover: NSPopover?
+  private var popoverHostingController: NSHostingController<QuotaPopoverView>?
   private var dashboardHostingView: NSHostingView<DashboardMenuSurface>!
   private let dashboardMenuItem = NSMenuItem(title: "Codex 额度概览", action: nil, keyEquivalent: "")
   private var detailHostingViews: [QuotaMenuPage: NSHostingView<QuotaDetailsView>] = [:]
@@ -135,6 +210,7 @@ final class StatusBarQuotaController: NSObject, NSMenuDelegate {
     self.dashboardMenuItem.setAccessibilityChildren([self.dashboardHostingView!])
     self.dashboardMenuItem.isEnabled = true
     self.configureButton()
+    self.configurePopover()
     self.observeStore()
     self.update()
     guard startsAutomatically else { return }
@@ -146,18 +222,71 @@ final class StatusBarQuotaController: NSObject, NSMenuDelegate {
         self?.accountManager.reload()
         self?.store.refresh()
         self?.dashboardStore.refreshLocalUsage(force: true)
-        self?.assistant.signals.tick()
       }
     }
   }
 
   private func configureButton() {
-    self.statusItem.length = 64
+    self.statusItem.length = StatusBarQuotaView.dualWidth
     guard let button = self.statusItem.button else { return }
     button.title = ""
     button.imagePosition = .imageOnly
     button.imageScaling = .scaleNone
-    button.toolTip = "Codex 额度"
+    button.toolTip = "Codex & Google 额度"
+    button.target = self
+    button.action = #selector(self.togglePopover(_:))
+    button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+  }
+
+  private func configurePopover() {
+    let actions = QuotaPopoverActions(
+      onRefresh: { [weak self] in self?.refresh() },
+      onSwitchAccount: { [weak self] id in self?.switchAccount(id: id) },
+      onAddAccount: { [weak self] in self?.addAccount() },
+      onRemoveAccount: { [weak self] id in self?.removeAccount(id: id) },
+      onToggleLaunchAtLogin: { [weak self] in self?.toggleLaunchAtLogin() },
+      isLaunchAtLoginEnabled: { [weak self] in self?.launchAtLoginController.isEnabled ?? false },
+      launchAtLoginRequiresApproval: { [weak self] in
+        self?.launchAtLoginController.requiresApproval ?? false
+      },
+      beforeNotificationPermission: { [weak self] in
+        await self?.prepareForNotificationPermission()
+      },
+      onNotificationSettings: { [weak self] in self?.openNotificationSettings() },
+      onQuit: { [weak self] in self?.quit() })
+    let rootView = QuotaPopoverView(model: self.assistant, actions: actions)
+    let hosting = NSHostingController(rootView: rootView)
+    hosting.sizingOptions = [.preferredContentSize]
+    let popover = NSPopover()
+    popover.behavior = .transient
+    popover.animates = true
+    popover.delegate = self
+    popover.contentViewController = hosting
+    self.popoverHostingController = hosting
+    self.popover = popover
+  }
+
+  @objc private func togglePopover(_ sender: AnyObject?) {
+    _ = sender
+    guard let popover = self.popover, let button = self.statusItem.button else { return }
+    if popover.isShown {
+      popover.performClose(nil)
+    } else {
+      self.dashboardStore.tick(menuOpened: true)
+      Task { [weak self] in await self?.assistant.notifications.refreshPermission() }
+      popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+      popover.contentViewController?.view.window?.makeKey()
+    }
+  }
+
+  func popoverWillShow(_ notification: Notification) {
+    _ = notification
+    self.menuIsOpen = true
+  }
+
+  func popoverDidClose(_ notification: Notification) {
+    _ = notification
+    self.menuIsOpen = false
   }
 
   private func observeStore() {
@@ -186,12 +315,15 @@ final class StatusBarQuotaController: NSObject, NSMenuDelegate {
 
   private func update() {
     let snapshot = self.store.snapshot(for: .codex)
+    let google = self.store.snapshot(for: .antigravity)
     self.statusView.update(
-      StatusBarQuotaFormatter.display(for: snapshot, isRefreshing: self.store.isRefreshing))
+      StatusBarQuotaFormatter.display(
+        codex: snapshot, google: google, isRefreshing: self.store.isRefreshing))
+    self.statusItem.length = self.statusView.currentWidth
     self.statusItem.button?.image = self.statusView.renderedImage()
-    self.statusItem.button?.toolTip = StatusBarQuotaFormatter.detailLines(for: snapshot).joined(
-      separator: "\n")
-    if !self.menuIsOpen { self.statusItem.menu = self.makeMenu(snapshot: snapshot) }
+    self.statusItem.button?.toolTip = StatusBarQuotaFormatter.detailLines(
+      for: snapshot, google: google
+    ).joined(separator: "\n")
   }
 
   func menuWillOpen(_ menu: NSMenu) {
@@ -209,6 +341,9 @@ final class StatusBarQuotaController: NSObject, NSMenuDelegate {
   }
 
   func stop() {
+    self.popover?.performClose(nil)
+    self.popover = nil
+    self.popoverHostingController = nil
     self.assistant.stop()
     if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
     self.cancellables.removeAll()
@@ -368,6 +503,7 @@ final class StatusBarQuotaController: NSObject, NSMenuDelegate {
   }
 
   private func prepareForNotificationPermission() async {
+    self.popover?.performClose(nil)
     self.statusItem.menu?.cancelTracking()
     await withCheckedContinuation { continuation in
       DispatchQueue.main.async {
@@ -378,6 +514,7 @@ final class StatusBarQuotaController: NSObject, NSMenuDelegate {
   }
 
   private func openNotificationSettings() {
+    self.popover?.performClose(nil)
     self.statusItem.menu?.cancelTracking()
     DispatchQueue.main.async {
       guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.notifications")
@@ -502,6 +639,10 @@ final class StatusBarQuotaController: NSObject, NSMenuDelegate {
     guard let rawID = sender.representedObject as? String, let id = UUID(uuidString: rawID) else {
       return
     }
+    self.switchAccount(id: id)
+  }
+
+  private func switchAccount(id: UUID) {
     Task { @MainActor [weak self] in
       guard let self else { return }
       self.store.cancelInFlightRefresh(.codex)
@@ -524,6 +665,10 @@ final class StatusBarQuotaController: NSObject, NSMenuDelegate {
     guard let rawID = sender.representedObject as? String, let id = UUID(uuidString: rawID) else {
       return
     }
+    self.removeAccount(id: id)
+  }
+
+  private func removeAccount(id: UUID) {
     let alert = NSAlert()
     alert.messageText = "移除这个已保存账号？"
     alert.informativeText = "只会删除 QuotaFloat 保存的独立 Codex 登录，不会退出当前系统 Codex 账号。"
@@ -605,12 +750,22 @@ final class StatusBarQuotaController: NSObject, NSMenuDelegate {
 }
 
 final class StatusBarQuotaView: NSView {
-  private let iconView = QuotaStatusIconView()
+  static let singleWidth: CGFloat = 64
+  static let dualWidth: CGFloat = 128
+
+  private let iconView = QuotaStatusIconView(letter: "C")
+  private let googleIconView = QuotaStatusIconView(letter: "G")
   private let sessionLabel = NSTextField(labelWithString: "5h --")
   private let weeklyLabel = NSTextField(labelWithString: "W --")
+  private var googleTopText: String?
+  private var googleBottomText: String?
+
+  var currentWidth: CGFloat {
+    self.googleTopText != nil ? Self.dualWidth : Self.singleWidth
+  }
 
   override init(frame frameRect: NSRect) {
-    super.init(frame: NSRect(x: 0, y: 0, width: 64, height: 22))
+    super.init(frame: NSRect(x: 0, y: 0, width: Self.dualWidth, height: 22))
     self.setup()
   }
 
@@ -620,68 +775,54 @@ final class StatusBarQuotaView: NSView {
   }
 
   private func setup() {
-    self.toolTip = "Codex 额度"
+    self.toolTip = "Codex & Google 额度"
     self.wantsLayer = true
-
-    self.iconView.translatesAutoresizingMaskIntoConstraints = false
-    self.sessionLabel.translatesAutoresizingMaskIntoConstraints = false
-    self.weeklyLabel.translatesAutoresizingMaskIntoConstraints = false
-
-    for label in [self.sessionLabel, self.weeklyLabel] {
-      label.font = .monospacedSystemFont(ofSize: 9.2, weight: .semibold)
-      label.textColor = .white
-      label.alignment = .left
-      label.lineBreakMode = .byClipping
-      label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-    }
-
-    let textStack = NSStackView(views: [self.sessionLabel, self.weeklyLabel])
-    textStack.orientation = .vertical
-    textStack.spacing = -1
-    textStack.alignment = .leading
-    textStack.translatesAutoresizingMaskIntoConstraints = false
-
-    self.addSubview(self.iconView)
-    self.addSubview(textStack)
-
-    NSLayoutConstraint.activate([
-      self.iconView.leadingAnchor.constraint(equalTo: self.leadingAnchor, constant: 3),
-      self.iconView.centerYAnchor.constraint(equalTo: self.centerYAnchor),
-      self.iconView.widthAnchor.constraint(equalToConstant: 15),
-      self.iconView.heightAnchor.constraint(equalToConstant: 15),
-
-      textStack.leadingAnchor.constraint(equalTo: self.iconView.trailingAnchor, constant: 3),
-      textStack.trailingAnchor.constraint(lessThanOrEqualTo: self.trailingAnchor, constant: -2),
-      textStack.centerYAnchor.constraint(equalTo: self.centerYAnchor),
-    ])
   }
 
   func update(_ display: StatusBarQuotaDisplay) {
     self.sessionLabel.stringValue = display.sessionLine
     self.weeklyLabel.stringValue = display.weeklyLine
     self.iconView.remainingPercent = display.iconRemainingPercent
+    self.googleTopText = display.googleTopLine
+    self.googleBottomText = display.googleBottomLine
+    self.googleIconView.remainingPercent = display.googleIconRemainingPercent
     self.needsDisplay = true
   }
 
   func renderedImage() -> NSImage {
-    let renderBounds = NSRect(x: 0, y: 0, width: 64, height: 22)
+    let width = self.currentWidth
+    let renderBounds = NSRect(x: 0, y: 0, width: width, height: 22)
     let image = NSImage(size: renderBounds.size)
     image.isTemplate = false
     image.lockFocus()
     defer { image.unlockFocus() }
-
-    self.iconView.drawIcon(in: NSRect(x: 3, y: 3.5, width: 15, height: 15))
 
     let attributes: [NSAttributedString.Key: Any] = [
       .font: NSFont.monospacedSystemFont(ofSize: 8.6, weight: .semibold),
       .foregroundColor: NSColor.white,
       .paragraphStyle: Self.statusTextParagraphStyle,
     ]
-    let textRect = NSRect(x: 21, y: 1, width: 42, height: 20)
+
+    // Left: Codex ("C" + 5h / W)
+    self.iconView.drawIcon(in: NSRect(x: 3, y: 3.5, width: 15, height: 15))
+    let codexTextRect = NSRect(x: 20, y: 1, width: 41, height: 20)
     NSAttributedString(string: self.weeklyLabel.stringValue, attributes: attributes)
-      .draw(in: NSRect(x: textRect.minX, y: textRect.minY, width: textRect.width, height: 10))
+      .draw(in: NSRect(x: codexTextRect.minX, y: codexTextRect.minY, width: codexTextRect.width, height: 10))
     NSAttributedString(string: self.sessionLabel.stringValue, attributes: attributes)
-      .draw(in: NSRect(x: textRect.minX, y: textRect.minY + 10, width: textRect.width, height: 10))
+      .draw(in: NSRect(x: codexTextRect.minX, y: codexTextRect.minY + 10, width: codexTextRect.width, height: 10))
+
+    // Right: Google / Antigravity ("G" + G / C)
+    if let googleTop = self.googleTopText, let googleBottom = self.googleBottomText {
+      NSColor.white.withAlphaComponent(0.28).setFill()
+      NSRect(x: 62.5, y: 4, width: 0.8, height: 14).fill()
+
+      self.googleIconView.drawIcon(in: NSRect(x: 66, y: 3.5, width: 15, height: 15))
+      let googleTextRect = NSRect(x: 83, y: 1, width: 44, height: 20)
+      NSAttributedString(string: googleBottom, attributes: attributes)
+        .draw(in: NSRect(x: googleTextRect.minX, y: googleTextRect.minY, width: googleTextRect.width, height: 10))
+      NSAttributedString(string: googleTop, attributes: attributes)
+        .draw(in: NSRect(x: googleTextRect.minX, y: googleTextRect.minY + 10, width: googleTextRect.width, height: 10))
+    }
 
     return image
   }
@@ -697,8 +838,19 @@ final class StatusBarQuotaView: NSView {
 }
 
 final class QuotaStatusIconView: NSView {
+  let letter: String
   var remainingPercent: Double? {
     didSet { self.needsDisplay = true }
+  }
+
+  init(letter: String = "C", frame frameRect: NSRect = .zero) {
+    self.letter = letter
+    super.init(frame: frameRect)
+  }
+
+  required init?(coder: NSCoder) {
+    self.letter = "C"
+    super.init(coder: coder)
   }
 
   override func draw(_ dirtyRect: NSRect) {
@@ -708,7 +860,7 @@ final class QuotaStatusIconView: NSView {
 
   func drawIcon(in rect: NSRect) {
     let font = NSFont.systemFont(ofSize: 14, weight: .black)
-    guard let path = Self.letterPath("C", font: font, in: rect.insetBy(dx: 0.5, dy: 0.5)) else {
+    guard let path = Self.letterPath(self.letter, font: font, in: rect.insetBy(dx: 0.5, dy: 0.5)) else {
       return
     }
 

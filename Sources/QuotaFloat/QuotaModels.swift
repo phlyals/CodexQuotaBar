@@ -2,6 +2,7 @@ import Foundation
 
 enum QuotaProvider: String, Codable, CaseIterable, Identifiable, Sendable {
   case codex
+  case antigravity
 
   var id: String { self.rawValue }
 
@@ -115,12 +116,19 @@ enum QuotaFreshness: String, Codable, Equatable, Sendable {
   case unavailable
 }
 
+struct QuotaNamedWindow: Codable, Equatable, Identifiable, Sendable {
+  let id: String
+  let title: String
+  let window: QuotaWindow
+}
+
 struct QuotaSnapshot: Codable, Equatable, Identifiable, Sendable {
   let provider: QuotaProvider
   let session: QuotaWindow?
   let weekly: QuotaWindow?
   let sparkSession: QuotaWindow?
   let sparkWeekly: QuotaWindow?
+  let extraWindows: [QuotaNamedWindow]?
   let creditsRemaining: Double?
   let creditsUnlimited: Bool?
   let creditsUpdatedAt: Date?
@@ -143,6 +151,7 @@ struct QuotaSnapshot: Codable, Equatable, Identifiable, Sendable {
       || self.weekly != nil
       || self.sparkSession != nil
       || self.sparkWeekly != nil
+      || !(self.extraWindows?.isEmpty ?? true)
       || self.creditsRemaining != nil
       || self.creditsUnlimited == true
       || self.resetCredits != nil
@@ -154,6 +163,7 @@ struct QuotaSnapshot: Codable, Equatable, Identifiable, Sendable {
     weekly: QuotaWindow?,
     sparkSession: QuotaWindow? = nil,
     sparkWeekly: QuotaWindow? = nil,
+    extraWindows: [QuotaNamedWindow]? = nil,
     creditsRemaining: Double? = nil,
     creditsUnlimited: Bool? = nil,
     creditsUpdatedAt: Date? = nil,
@@ -173,6 +183,8 @@ struct QuotaSnapshot: Codable, Equatable, Identifiable, Sendable {
     self.weekly = weekly.flatMap { $0.isValid ? $0 : nil }
     self.sparkSession = sparkSession.flatMap { $0.isValid ? $0 : nil }
     self.sparkWeekly = sparkWeekly.flatMap { $0.isValid ? $0 : nil }
+    let validExtras = extraWindows?.filter { $0.window.isValid }
+    self.extraWindows = (validExtras?.isEmpty ?? true) ? nil : validExtras
     self.creditsRemaining = creditsRemaining.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }
     self.creditsUnlimited = creditsUnlimited
     self.creditsUpdatedAt = creditsUpdatedAt
@@ -215,6 +227,7 @@ struct QuotaSnapshot: Codable, Equatable, Identifiable, Sendable {
       weekly: self.weekly,
       sparkSession: self.sparkSession,
       sparkWeekly: self.sparkWeekly,
+      extraWindows: self.extraWindows,
       creditsRemaining: self.creditsRemaining,
       creditsUnlimited: self.creditsUnlimited,
       creditsUpdatedAt: self.creditsUpdatedAt,

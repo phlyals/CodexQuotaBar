@@ -585,6 +585,10 @@ private struct ProviderMark: View {
         switch self.provider.definition.icon {
         case .codex:
           CodexMark()
+        case .antigravity:
+          Image(systemName: "sparkles")
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(Color(red: 0.24, green: 0.72, blue: 0.50))
         }
       }
       .frame(width: 24, height: 24)

@@ -188,8 +188,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     NSApplication.shared.setActivationPolicy(.accessory)
-    self.contentPreferences.setSelectedProviders([.codex])
-    self.store.setActiveProviders([.codex])
+    self.contentPreferences.setSelectedProviders([.codex, .antigravity])
+    self.store.setActiveProviders([.codex, .antigravity])
     self.codexAuthMonitor = CodexAuthMonitor { [weak self] change in
       guard let self else { return }
       self.accountManager.synchronizeLiveCredentials()

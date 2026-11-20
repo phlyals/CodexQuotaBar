@@ -31,9 +31,8 @@ final class QuotaAssistantModel: ObservableObject {
     }.store(in: &cancellables)
     dashboard.$now.receive(on: DispatchQueue.main).sink { [weak self] now in
       guard let self else { return }
-      self.signals.tick(now: now)
       self.notifications.process(
-        self.dashboard.quota, signals: self.signals.archive.signals, now: now)
+        self.dashboard.quota, signals: [], now: now)
     }.store(in: &cancellables)
   }
 
