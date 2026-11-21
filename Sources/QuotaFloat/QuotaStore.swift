@@ -180,7 +180,7 @@ final class QuotaStore: ObservableObject {
       let outcome: QuotaRefreshOutcome
       do {
         let snapshot = try await Self.fetchWithTimeout(
-          provider: provider, fetcher: fetcher, timeoutSeconds: 25)
+          provider: provider, fetcher: fetcher, timeoutSeconds: 45)
         outcome = QuotaRefreshOutcome(
           provider: provider,
           snapshot: snapshot,
@@ -357,9 +357,9 @@ final class QuotaStore: ObservableObject {
     case .antigravity:
       return switch Self.failureState(message) {
       case .authRequired:
-        "未检测到 Antigravity 登录状态，请在客户端登录后刷新"
+        "Antigravity 未登录，请在终端运行 agy 登录后刷新"
       default:
-        "未检测到运行中的 Antigravity，启动客户端后将自动同步"
+        "新版 Antigravity 需安装官方 CLI（brew install --cask antigravity-cli）并运行 agy 登录"
       }
     }
   }
