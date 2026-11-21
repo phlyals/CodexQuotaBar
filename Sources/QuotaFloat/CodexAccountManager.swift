@@ -291,15 +291,6 @@ final class CodexAccountManager: ObservableObject {
       throw CodexAccountManagerError.targetIdentityMismatch
     }
 
-    let targetFingerprint = CodexAuthFingerprint.fingerprint(data: targetData)
-    let liveFingerprint = CodexAuthFingerprint.fingerprint(
-      homePath: self.paths.liveHomeURL.path,
-      fileManager: self.fileManager)
-    if targetFingerprint == liveFingerprint {
-      self.reload()
-      return
-    }
-
     let liveAuthURL = self.paths.liveHomeURL.appendingPathComponent("auth.json")
     let previousLiveData: Data?
     if self.fileManager.fileExists(atPath: liveAuthURL.path) {
@@ -309,6 +300,13 @@ final class CodexAccountManager: ObservableObject {
       previousLiveData = data
     } else {
       previousLiveData = nil
+    }
+
+    let targetFingerprint = CodexAuthFingerprint.fingerprint(data: targetData)
+    let liveFingerprint = previousLiveData.map { CodexAuthFingerprint.fingerprint(data: $0) }
+    if targetFingerprint == liveFingerprint {
+      self.reload()
+      return
     }
 
     var updatedAccounts = snapshot.accounts
@@ -444,7 +442,16 @@ final class CodexAccountManager: ObservableObject {
     environment: [String: String]
   ) -> CodexAuthBackedAccount? {
     let env = CodexHomeScope.scopedEnvironment(base: environment, codexHome: homeURL.path)
-    let account = UsageFetcher(environment: env).loadAuthBackedCodexAccount()
+    let fetcher = UsageFetcher(environment: env)
+    let account: CodexAuthBackedAccount
+    if CodexCredentialFileAccess.isTestContext {
+      let authURL = homeURL.appendingPathComponent("auth.json")
+      account = CodexCredentialFileAccess.withFixtureScope(.init(files: [authURL])) {
+        fetcher.loadAuthBackedCodexAccount()
+      }
+    } else {
+      account = fetcher.loadAuthBackedCodexAccount()
+    }
     guard account.identity != .unresolved || account.email != nil else { return nil }
     return account
   }

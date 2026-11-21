@@ -42,7 +42,9 @@ final class CodexQuotaMappingTests: XCTestCase {
     let result = try CodexBarQuotaFetcher.mapResponse(
       response, credentials: credentials,
       resets: .init(credits: credits, availableCount: 2, updatedAt: now), accountKey: "a", now: now)
-    XCTAssertEqual(result.resetCredits?.details?.map(\.id), ["24.0", "72.0"])
+    XCTAssertEqual(
+      result.resetCredits?.details?.map(\.expiresAt),
+      [now.addingTimeInterval(24 * 3600), now.addingTimeInterval(72 * 3600)])
     XCTAssertEqual(result.resetCredits?.details?.first?.scope, "weekly")
   }
 

@@ -162,7 +162,6 @@ struct QuotaPopoverView: View {
         .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
       }
       .buttonStyle(.plain)
-      .disabled(self.dashboard.isRefreshing)
       .help("立即刷新全部额度 (⌘R)")
     }
     .padding(.horizontal, 14)
@@ -303,6 +302,7 @@ struct QuotaPopoverView: View {
             .padding(.vertical, 1)
             .background(Color(red: 0.24, green: 0.72, blue: 0.50).opacity(0.16), in: Capsule())
             .foregroundStyle(Color(red: 0.24, green: 0.72, blue: 0.50))
+            .lineLimit(1)
         }
         Spacer(minLength: 4)
         if let email = google?.accountEmail, !email.isEmpty {
@@ -855,8 +855,11 @@ struct QuotaPopoverView: View {
   }
 
   private var updatedText: String {
+    if self.dashboard.isRefreshing { return "正在刷新…" }
     guard let updatedAt = self.dashboard.quota?.updatedAt else { return "等待同步" }
-    return RelativeTimeFormatter.string(from: updatedAt, to: self.dashboard.now) + "更新"
+    let formatter = DateFormatter()
+    formatter.dateFormat = "HH:mm:ss"
+    return "\(formatter.string(from: updatedAt)) 更新"
   }
 
   private var subscriptionSummaryText: String {

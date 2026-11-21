@@ -98,8 +98,8 @@ struct CodexBarQuotaFetcher: QuotaFetching {
       claudeFetcher: ClaudeUsageFetcher(
         browserDetection: browserDetection, environment: environment),
       browserDetection: browserDetection,
-      persistsCLISessions: true,
-      persistentCLISessionIdleWindow: 300)
+      persistsCLISessions: false,
+      persistentCLISessionIdleWindow: nil)
     let result = try await AntigravityProviderDescriptor.descriptor.fetch(context: context)
     try Task.checkCancellation()
     return try Self.mapAntigravityUsage(result.usage, source: result.sourceLabel)

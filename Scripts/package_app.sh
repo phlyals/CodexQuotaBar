@@ -19,8 +19,8 @@ if [[ "${QUOTAFLOAT_USE_EXISTING_CODEXBAR_CLI:-0}" == "1" ]]; then
     exit 1
   fi
 else
-  swift build "${SWIFT_BUILD_FLAGS[@]}" --package-path "$CODEXBAR_PACKAGE" -c release --product CodexBarCLI
-  CODEXBAR_BIN_DIR="$(swift build "${SWIFT_BUILD_FLAGS[@]}" --package-path "$CODEXBAR_PACKAGE" -c release --show-bin-path)"
+  swift build "${SWIFT_BUILD_FLAGS[@]}" -c release --product CodexBarCLI
+  CODEXBAR_BIN_DIR="$BIN_DIR"
 fi
 APP="$ROOT/dist/codex额度显示器.app"
 
@@ -30,6 +30,8 @@ rm -rf "$ROOT/dist/CodexQuotaBar.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Helpers"
 cp "$BIN_DIR/QuotaFloat" "$APP/Contents/MacOS/QuotaFloat"
 cp "$CODEXBAR_BIN_DIR/CodexBarCLI" "$APP/Contents/Helpers/CodexBarCLI"
+cp -R "$BIN_DIR/CodexBar_CodexBarCore.bundle" "$APP/Contents/Resources/"
+sed -n 's/^MARKETING_VERSION=//p' "$CODEXBAR_PACKAGE/version.env" > "$APP/Contents/Helpers/VERSION"
 cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
 cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 cp "$ROOT/LICENSE" "$APP/Contents/Resources/QuotaFloat-LICENSE.txt"

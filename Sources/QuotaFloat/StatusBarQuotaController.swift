@@ -53,22 +53,16 @@ enum StatusBarQuotaFormatter {
     let googleTop: String?
     let googleBottom: String?
     let googlePct: Double?
-    if includeGoogle {
-      if let google, google.hasQuotaData {
-        let gPrefix: String =
-          switch google.freshness {
-          case .fresh: ""
-          case .cached: "~"
-          case .stale, .unavailable, .authRequired: "!"
-          }
-        googleTop = "\(gPrefix)5h \(Self.percent(google.session))"
-        googleBottom = "\(gPrefix)W \(Self.percent(google.weekly))"
-        googlePct = google.session?.remainingPercent ?? google.weekly?.remainingPercent
-      } else {
-        googleTop = "5h --"
-        googleBottom = "W --"
-        googlePct = nil
-      }
+    if includeGoogle, let google, google.hasQuotaData {
+      let gPrefix: String =
+        switch google.freshness {
+        case .fresh: ""
+        case .cached: "~"
+        case .stale, .unavailable, .authRequired: "!"
+        }
+      googleTop = "\(gPrefix)5h \(Self.percent(google.session))"
+      googleBottom = "\(gPrefix)W \(Self.percent(google.weekly))"
+      googlePct = google.session?.remainingPercent ?? google.weekly?.remainingPercent
     } else {
       googleTop = nil
       googleBottom = nil
@@ -617,7 +611,7 @@ final class StatusBarQuotaController: NSObject, NSMenuDelegate, NSPopoverDelegat
 
   @objc private func refresh() {
     self.accountManager.reload()
-    self.store.refresh()
+    self.store.forceRefreshAll()
     self.dashboardStore.refreshLocalUsage(force: true)
     self.update()
   }

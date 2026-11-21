@@ -100,6 +100,13 @@ final class QuotaStore: ObservableObject {
     self.refresh(providers: self.activeProviders, force: true)
   }
 
+  func forceRefreshAll() {
+    for provider in self.activeProviders {
+      self.cancelInFlightRefresh(provider)
+    }
+    self.refresh(providers: self.activeProviders, force: true)
+  }
+
   func invalidateAndRefresh(_ provider: QuotaProvider) {
     self.cancelInFlightRefresh(provider)
     self.snapshots.removeValue(forKey: provider)
@@ -172,7 +179,8 @@ final class QuotaStore: ObservableObject {
     self.inFlightTasks[provider] = Task { [weak self] in
       let outcome: QuotaRefreshOutcome
       do {
-        let snapshot = try await fetcher.fetch(provider)
+        let snapshot = try await Self.fetchWithTimeout(
+          provider: provider, fetcher: fetcher, timeoutSeconds: 25)
         outcome = QuotaRefreshOutcome(
           provider: provider,
           snapshot: snapshot,
@@ -194,6 +202,29 @@ final class QuotaStore: ObservableObject {
 
       guard let self else { return }
       self.finishRefresh(outcome, token: token, accountKey: accountKey)
+    }
+  }
+
+  private enum FetchTimeoutError: LocalizedError {
+    case timedOut
+    var errorDescription: String? { "request timed out" }
+  }
+
+  private static func fetchWithTimeout(
+    provider: QuotaProvider,
+    fetcher: any QuotaFetching,
+    timeoutSeconds: TimeInterval
+  ) async throws -> QuotaSnapshot {
+    try await withThrowingTaskGroup(of: QuotaSnapshot.self) { group in
+      group.addTask {
+        try await fetcher.fetch(provider)
+      }
+      group.addTask {
+        try await Task.sleep(for: .seconds(timeoutSeconds))
+        throw FetchTimeoutError.timedOut
+      }
+      defer { group.cancelAll() }
+      return try await group.next()!
     }
   }
 
@@ -326,9 +357,9 @@ final class QuotaStore: ObservableObject {
     case .antigravity:
       return switch Self.failureState(message) {
       case .authRequired:
-        "未检测到 Antigravity 登录状态"
+        "未检测到 Antigravity 登录状态，请在客户端登录后刷新"
       default:
-        "Google 额度暂不可用，请确认 Antigravity 已运行或已登录"
+        "未检测到运行中的 Antigravity，启动客户端后将自动同步"
       }
     }
   }

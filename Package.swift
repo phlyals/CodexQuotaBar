@@ -12,7 +12,7 @@ let package = Package(
   dependencies: [
     .package(
       url: "https://github.com/steipete/CodexBar.git",
-      revision: "3f3e2f4a112aa504c493ad5636c94e45df85fd03")
+      revision: "c94b855f308370c503c9f4caad9f1ca4e2151444")
   ],
   targets: [
     .executableTarget(
