@@ -133,7 +133,7 @@ final class StatusBarQuotaFormatterTests: XCTestCase {
       accountKey: "dev@example.com",
       accountPlan: "Pro",
       source: "app",
-      updatedAt: Date(timeIntervalSince1970: 1_000),
+      updatedAt: Date(timeIntervalSince1970: 2_000),
       freshness: .fresh,
       message: nil)
 
@@ -143,6 +143,12 @@ final class StatusBarQuotaFormatterTests: XCTestCase {
     XCTAssertEqual(display.googleTopLine, "5h 90%")
     XCTAssertEqual(display.googleBottomLine, "W 75%")
     XCTAssertEqual(display.googleIconRemainingPercent, 90)
+
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.dateFormat = "HH:mm:ss"
+    let lines = StatusBarQuotaFormatter.detailLines(for: codex, google: google)
+    XCTAssertTrue(lines.contains("Google 更新：\(formatter.string(from: google.updatedAt))"))
   }
 
   @MainActor

@@ -20,12 +20,14 @@ enum QuotaRefreshPolicy {
 
 @MainActor
 final class QuotaStore: ObservableObject {
-  static let defaultRefreshInterval: TimeInterval = 120
+  static let defaultRefreshInterval: TimeInterval = 60
   static let defaultStaleAfter: TimeInterval = 300
 
   @Published private(set) var snapshots: [QuotaProvider: QuotaSnapshot] = [:]
-  @Published private(set) var isRefreshing = false
+  @Published private(set) var refreshingProviders: Set<QuotaProvider> = []
   @Published private(set) var lastRefreshAttempt: Date?
+
+  var isRefreshing: Bool { !self.refreshingProviders.isEmpty }
 
   private let fetcher: any QuotaFetching
   private let cacheStore: QuotaCacheStore
@@ -35,6 +37,7 @@ final class QuotaStore: ObservableObject {
   private var failureCounts: [QuotaProvider: Int] = [:]
   private var activeProviders: Set<QuotaProvider> = [.codex]
   private var lastAttemptByProvider: [QuotaProvider: Date] = [:]
+  private var lastCompletionByProvider: [QuotaProvider: Date] = [:]
   private var inFlightTasks: [QuotaProvider: Task<Void, Never>] = [:]
   private var inFlightTokens: [QuotaProvider: UUID] = [:]
   private var timerTask: Task<Void, Never>?
@@ -82,7 +85,7 @@ final class QuotaStore: ObservableObject {
     self.inFlightTasks.removeAll()
     self.inFlightTokens.removeAll()
     self.hasStarted = false
-    self.isRefreshing = false
+    self.refreshingProviders.removeAll()
   }
 
   func setActiveProviders(_ providers: Set<QuotaProvider>) {
@@ -100,6 +103,19 @@ final class QuotaStore: ObservableObject {
     self.refresh(providers: self.activeProviders, force: true)
   }
 
+  func refreshIfStale(maxAge: TimeInterval = 15) {
+    let now = Date()
+    let due = self.activeProviders.filter { provider in
+      guard self.inFlightTasks[provider] == nil else { return false }
+      let lastRefresh = max(
+        self.lastAttemptByProvider[provider] ?? .distantPast,
+        self.lastCompletionByProvider[provider] ?? .distantPast)
+      return now.timeIntervalSince(lastRefresh) >= maxAge
+    }
+    guard !due.isEmpty else { return }
+    self.refresh(providers: due, force: true)
+  }
+
   func forceRefreshAll() {
     for provider in self.activeProviders {
       self.cancelInFlightRefresh(provider)
@@ -111,6 +127,7 @@ final class QuotaStore: ObservableObject {
     self.cancelInFlightRefresh(provider)
     self.snapshots.removeValue(forKey: provider)
     self.lastAttemptByProvider.removeValue(forKey: provider)
+    self.lastCompletionByProvider.removeValue(forKey: provider)
     self.cacheStore.save(Array(self.snapshots.values))
     self.refresh(providers: [provider], force: true)
   }
@@ -119,7 +136,7 @@ final class QuotaStore: ObservableObject {
     self.inFlightTasks[provider]?.cancel()
     self.inFlightTasks.removeValue(forKey: provider)
     self.inFlightTokens.removeValue(forKey: provider)
-    self.isRefreshing = !self.inFlightTasks.isEmpty
+    self.refreshingProviders.remove(provider)
     self.scheduleNextRefresh()
   }
 
@@ -139,6 +156,7 @@ final class QuotaStore: ObservableObject {
         self.cancelInFlightRefresh(provider)
         self.snapshots.removeValue(forKey: provider)
         self.lastAttemptByProvider.removeValue(forKey: provider)
+        self.lastCompletionByProvider.removeValue(forKey: provider)
       }
       guard self.inFlightTasks[provider] == nil else { continue }
       guard
@@ -174,7 +192,6 @@ final class QuotaStore: ObservableObject {
       accountKey = nil
     }
     self.inFlightTokens[provider] = token
-    self.isRefreshing = true
 
     self.inFlightTasks[provider] = Task { [weak self] in
       let outcome: QuotaRefreshOutcome
@@ -203,6 +220,7 @@ final class QuotaStore: ObservableObject {
       guard let self else { return }
       self.finishRefresh(outcome, token: token, accountKey: accountKey)
     }
+    self.refreshingProviders.insert(provider)
   }
 
   private enum FetchTimeoutError: LocalizedError {
@@ -237,13 +255,15 @@ final class QuotaStore: ObservableObject {
     if outcome.provider == .codex, self.identityProvider() != accountKey {
       self.snapshots.removeValue(forKey: outcome.provider)
       self.lastAttemptByProvider.removeValue(forKey: outcome.provider)
-      self.isRefreshing = !self.inFlightTasks.isEmpty
+      self.lastCompletionByProvider.removeValue(forKey: outcome.provider)
+      self.refreshingProviders.remove(outcome.provider)
       self.refresh(providers: [outcome.provider], force: true)
       return
     }
 
+    let now = Date()
+    self.lastCompletionByProvider[outcome.provider] = now
     if !outcome.wasCancelled {
-      let now = Date()
       if let snapshot = outcome.snapshot {
         if outcome.provider != .codex || snapshot.accountKey == nil
           || snapshot.accountKey == accountKey
@@ -272,7 +292,7 @@ final class QuotaStore: ObservableObject {
       self.cacheStore.save(Array(self.snapshots.values))
     }
 
-    self.isRefreshing = !self.inFlightTasks.isEmpty
+    self.refreshingProviders.remove(outcome.provider)
     self.scheduleNextRefresh()
   }
 

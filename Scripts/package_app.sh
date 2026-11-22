@@ -12,15 +12,12 @@ fi
 swift build "${SWIFT_BUILD_FLAGS[@]}" -c release --product QuotaFloat
 BIN_DIR="$(swift build "${SWIFT_BUILD_FLAGS[@]}" -c release --show-bin-path)"
 CODEXBAR_PACKAGE="$ROOT/.build/checkouts/CodexBar"
-if [[ "${QUOTAFLOAT_USE_EXISTING_CODEXBAR_CLI:-0}" == "1" ]]; then
-  CODEXBAR_BIN_DIR="$CODEXBAR_PACKAGE/.build/arm64-apple-macosx/release"
-  if [[ ! -x "$CODEXBAR_BIN_DIR/CodexBarCLI" ]]; then
-    echo "Existing CodexBarCLI helper was requested but not found." >&2
-    exit 1
-  fi
-else
+if [[ "${QUOTAFLOAT_USE_EXISTING_CODEXBAR_CLI:-0}" != "1" ]]; then
   swift build "${SWIFT_BUILD_FLAGS[@]}" -c release --product CodexBarCLI
-  CODEXBAR_BIN_DIR="$BIN_DIR"
+fi
+if [[ ! -x "$BIN_DIR/CodexBarCLI" ]]; then
+  echo "CodexBarCLI helper not found in the QuotaFloat release build directory." >&2
+  exit 1
 fi
 APP="$ROOT/dist/codex额度显示器.app"
 
@@ -29,7 +26,7 @@ rm -rf "$ROOT/dist/QuotaFloat.app"
 rm -rf "$ROOT/dist/CodexQuotaBar.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Helpers"
 cp "$BIN_DIR/QuotaFloat" "$APP/Contents/MacOS/QuotaFloat"
-cp "$CODEXBAR_BIN_DIR/CodexBarCLI" "$APP/Contents/Helpers/CodexBarCLI"
+cp "$BIN_DIR/CodexBarCLI" "$APP/Contents/Helpers/CodexBarCLI"
 cp -R "$BIN_DIR/CodexBar_CodexBarCore.bundle" "$APP/Contents/Resources/"
 sed -n 's/^MARKETING_VERSION=//p' "$CODEXBAR_PACKAGE/version.env" > "$APP/Contents/Helpers/VERSION"
 cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"

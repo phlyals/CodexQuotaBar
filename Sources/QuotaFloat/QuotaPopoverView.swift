@@ -312,6 +312,17 @@ struct QuotaPopoverView: View {
             .lineLimit(1)
             .truncationMode(.middle)
         }
+        HStack(spacing: 4) {
+          if self.dashboard.isRefreshingGoogle {
+            ProgressView().controlSize(.mini)
+            Text("刷新中…")
+          } else if let google, google.hasQuotaData {
+            Text("\(QuotaUpdateTimeFormatter.string(from: google.updatedAt)) 更新")
+          }
+        }
+        .font(.system(size: 10).monospacedDigit())
+        .foregroundStyle(.secondary)
+        .fixedSize()
       }
 
       if let google, google.hasQuotaData {
@@ -855,11 +866,9 @@ struct QuotaPopoverView: View {
   }
 
   private var updatedText: String {
-    if self.dashboard.isRefreshing { return "正在刷新…" }
-    guard let updatedAt = self.dashboard.quota?.updatedAt else { return "等待同步" }
-    let formatter = DateFormatter()
-    formatter.dateFormat = "HH:mm:ss"
-    return "\(formatter.string(from: updatedAt)) 更新"
+    if self.dashboard.isRefreshingCodex { return "Codex 刷新中…" }
+    guard let quota = self.dashboard.quota, quota.hasQuotaData else { return "Codex 等待同步" }
+    return "Codex \(QuotaUpdateTimeFormatter.string(from: quota.updatedAt)) 更新"
   }
 
   private var subscriptionSummaryText: String {

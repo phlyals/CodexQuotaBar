@@ -163,24 +163,26 @@ enum QuotaFloatSelfTest {
       "credential storage mode must parse comments safely")
 
     let refreshNow = Date(timeIntervalSince1970: 10_000)
+    let refreshInterval = QuotaStore.defaultRefreshInterval
+    try self.check(refreshInterval == 60, "background quota refresh must run every minute")
     try self.check(
       QuotaRefreshPolicy.isDue(
         lastAttemptAt: nil,
         now: refreshNow,
-        refreshInterval: 120),
+        refreshInterval: refreshInterval),
       "a provider with no request history must refresh immediately")
     try self.check(
       !QuotaRefreshPolicy.isDue(
-        lastAttemptAt: refreshNow.addingTimeInterval(-119),
+        lastAttemptAt: refreshNow.addingTimeInterval(1 - refreshInterval),
         now: refreshNow,
-        refreshInterval: 120),
-      "rapid content switching must not refresh again inside two minutes")
+        refreshInterval: refreshInterval),
+      "background refresh is not due before one minute")
     try self.check(
       QuotaRefreshPolicy.isDue(
-        lastAttemptAt: refreshNow.addingTimeInterval(-120),
+        lastAttemptAt: refreshNow.addingTimeInterval(-refreshInterval),
         now: refreshNow,
-        refreshInterval: 120),
-      "a displayed provider must become due after two minutes")
+        refreshInterval: refreshInterval),
+      "background refresh is due after one minute")
   }
 
   private static func check(_ condition: @autoclosure () -> Bool, _ message: String) throws {

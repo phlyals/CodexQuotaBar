@@ -10,7 +10,7 @@ final class QuotaStoreTests: XCTestCase {
     defer { try? FileManager.default.removeItem(at: root) }
     for message in ["HTTP 401", "network error: private@example.test /private/path"] {
       let cache = QuotaCacheStore(fileURL: root.appendingPathComponent("cache.json"))
-      cache.save([Self.fixture(key: "account-a")])
+      cache.save([Self.fixture(key: "account-a", updatedAt: Date().addingTimeInterval(-60))])
       let store = QuotaStore(
         fetcher: FailedQuotaFetcher(message: message), cacheStore: cache,
         identityProvider: { "account-a" })
@@ -23,8 +23,68 @@ final class QuotaStoreTests: XCTestCase {
       XCTAssertEqual(snapshot.session?.remainingPercent, 80)
       XCTAssertEqual(snapshot.freshness, message.contains("401") ? .authRequired : .cached)
       XCTAssertFalse(snapshot.message?.contains("private") == true)
+      let lastAttempt = store.lastRefreshAttempt
+      store.refreshIfStale()
+      XCTAssertEqual(store.lastRefreshAttempt, lastAttempt)
       store.stop()
     }
+  }
+
+  @MainActor
+  func testRefreshIfStaleTracksProvidersIndependentlyAndKeepsInFlightRequests() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let fetcher = ControlledQuotaFetcher()
+    let store = QuotaStore(
+      fetcher: fetcher, cacheStore: QuotaCacheStore(fileURL: root.appendingPathComponent("cache.json")),
+      refreshInterval: 3600, identityProvider: { "account-a" })
+    let dashboard = CodexDashboardStore(quotaStore: store)
+    store.setActiveProviders([.codex, .antigravity])
+    store.start()
+    defer { store.stop() }
+
+    let startedAt = try XCTUnwrap(store.lastRefreshAttempt)
+    XCTAssertEqual(store.refreshingProviders, [.codex, .antigravity])
+    for _ in 0..<200 {
+      if await fetcher.count == 2 { break }
+      try await Task.sleep(for: .milliseconds(5))
+    }
+    let initialProviders = await fetcher.providers
+    let codex = try XCTUnwrap(initialProviders.firstIndex(of: .codex))
+    let google = try XCTUnwrap(initialProviders.firstIndex(of: .antigravity))
+    XCTAssertTrue(dashboard.isRefreshingCodex)
+    XCTAssertTrue(dashboard.isRefreshingGoogle)
+
+    await fetcher.complete(codex, accountKey: "account-a")
+    for _ in 0..<200 {
+      if !dashboard.isRefreshingCodex { break }
+      try await Task.sleep(for: .milliseconds(5))
+    }
+    XCTAssertTrue(dashboard.isRefreshingGoogle)
+    XCTAssertEqual(store.refreshingProviders, [.antigravity])
+
+    // The attempt is old enough, but the completion is still within the window.
+    store.refreshIfStale(maxAge: Date().timeIntervalSince(startedAt))
+    XCTAssertEqual(store.refreshingProviders, [.antigravity])
+    store.refreshIfStale(maxAge: 0)
+    store.refreshIfStale(maxAge: 0)
+    XCTAssertEqual(store.refreshingProviders, [.codex, .antigravity])
+
+    for _ in 0..<200 {
+      if await fetcher.count >= 3 { break }
+      try await Task.sleep(for: .milliseconds(5))
+    }
+    let allProviders = await fetcher.providers
+    XCTAssertEqual(allProviders, initialProviders + [.codex])
+    await fetcher.complete(google)
+    await fetcher.complete(2, accountKey: "account-a")
+    for _ in 0..<200 {
+      if !dashboard.isRefreshing { break }
+      try await Task.sleep(for: .milliseconds(5))
+    }
+    XCTAssertFalse(dashboard.isRefreshing)
+    XCTAssertEqual(store.refreshingProviders, [])
+    XCTAssertEqual(store.snapshot(for: .antigravity)?.freshness, .fresh)
   }
 
   @MainActor
@@ -98,12 +158,12 @@ final class QuotaStoreTests: XCTestCase {
     store.stop()
   }
 
-  private static func fixture(key: String?) -> QuotaSnapshot {
+  private static func fixture(key: String?, updatedAt: Date = Date()) -> QuotaSnapshot {
     QuotaSnapshot(
       provider: .codex, session: QuotaWindow(usedPercent: 20, resetsAt: nil, windowMinutes: 300),
       weekly: nil,
       resetCredits: nil, accountEmail: "fixture@example.test", accountKey: key, source: "fixture",
-      updatedAt: Date(), freshness: .fresh, message: nil)
+      updatedAt: updatedAt, freshness: .fresh, message: nil)
   }
 
   @MainActor
@@ -151,20 +211,25 @@ private struct FailedQuotaFetcher: QuotaFetching {
 }
 
 private actor ControlledQuotaFetcher: QuotaFetching {
-  var count = 0
-  var pending: [Int: CheckedContinuation<QuotaSnapshot, Never>] = [:]
+  private(set) var providers: [QuotaProvider] = []
+  private var pending: [Int: CheckedContinuation<QuotaSnapshot, Never>] = [:]
+  var count: Int { self.providers.count }
+
   func fetch(_ provider: QuotaProvider) async throws -> QuotaSnapshot {
-    let index = count
-    count += 1
+    let index = self.count
+    self.providers.append(provider)
     return await withCheckedContinuation { pending[index] = $0 }
   }
-  func complete(_ index: Int) {
-    pending.removeValue(forKey: index)?.resume(
+
+  func complete(_ index: Int, accountKey: String? = nil) {
+    guard let continuation = self.pending.removeValue(forKey: index) else { return }
+    continuation.resume(
       returning: QuotaSnapshot(
-        provider: .codex,
+        provider: self.providers[index],
         session: QuotaWindow(usedPercent: Double(index), resetsAt: nil, windowMinutes: 300),
         weekly: nil,
-        resetCredits: nil, accountEmail: "fixture@example.test", accountKey: "account-\(index)",
+        resetCredits: nil, accountEmail: "fixture@example.test",
+        accountKey: accountKey ?? "account-\(index)",
         source: "fixture", updatedAt: Date(), freshness: .fresh, message: nil))
   }
 }

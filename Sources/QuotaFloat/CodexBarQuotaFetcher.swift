@@ -201,8 +201,8 @@ struct CodexBarQuotaFetcher: QuotaFetching {
 
     func makeWindow(_ bucket: AgyUsageEnvelope.CommandPayload.DataPayload.Group.Bucket) -> QuotaWindow? {
       guard let fraction = bucket.remainingFraction, fraction.isFinite else { return nil }
-      let remaining = min(100, max(0, fraction * 100))
-      let used = max(0, min(100, 100 - remaining))
+      // agy /usage and the Antigravity settings page show the nearest whole percent.
+      let remaining = min(100, max(0, fraction * 100)).rounded(.toNearestOrAwayFromZero)
       let resetDate = bucket.resetTime.flatMap { isoFormatter.date(from: $0) ?? fallbackISO.date(from: $0) }
       let minutes: Int? =
         switch bucket.window?.lowercased() {
@@ -210,7 +210,7 @@ struct CodexBarQuotaFetcher: QuotaFetching {
         case "weekly": 10_080
         default: nil
         }
-      return QuotaWindow(usedPercent: used, resetsAt: resetDate, windowMinutes: minutes)
+      return QuotaWindow(usedPercent: 100 - remaining, resetsAt: resetDate, windowMinutes: minutes)
     }
 
     var session: QuotaWindow?

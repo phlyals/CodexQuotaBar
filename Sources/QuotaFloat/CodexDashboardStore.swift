@@ -5,7 +5,7 @@ import Foundation
 final class CodexDashboardStore: ObservableObject {
   @Published private(set) var quota: QuotaSnapshot?
   @Published private(set) var googleQuota: QuotaSnapshot?
-  @Published private(set) var isRefreshing = false
+  @Published private(set) var refreshingProviders: Set<QuotaProvider>
   @Published private(set) var currentAccountEmail: String?
   @Published private(set) var subscription: CodexSubscriptionMetadata?
   @Published private(set) var localUsage: CodexLocalUsageSnapshot?
@@ -13,6 +13,10 @@ final class CodexDashboardStore: ObservableObject {
   @Published private(set) var localUsageMessage: String?
   @Published private(set) var now = Date()
   private(set) var lastLocalAttempt: Date?
+
+  var isRefreshing: Bool { !self.refreshingProviders.isEmpty }
+  var isRefreshingCodex: Bool { self.refreshingProviders.contains(.codex) }
+  var isRefreshingGoogle: Bool { self.refreshingProviders.contains(.antigravity) }
 
   var effectiveSubscription: CodexSubscriptionMetadata? {
     CodexSubscriptionCheck.resolve(
@@ -36,7 +40,7 @@ final class CodexDashboardStore: ObservableObject {
     self.localUsageFetcher = localUsageFetcher
     self.quota = quotaStore.snapshot(for: .codex)
     self.googleQuota = quotaStore.snapshot(for: .antigravity)
-    self.isRefreshing = quotaStore.isRefreshing
+    self.refreshingProviders = quotaStore.refreshingProviders
     self.currentAccountEmail = accountManager?.currentSystemEmail
     self.subscription = accountManager?.currentSubscription
     quotaStore.$snapshots
@@ -46,9 +50,9 @@ final class CodexDashboardStore: ObservableObject {
         self?.googleQuota = snapshots[.antigravity]
       }
       .store(in: &self.cancellables)
-    quotaStore.$isRefreshing
+    quotaStore.$refreshingProviders
       .receive(on: DispatchQueue.main)
-      .sink { [weak self] in self?.isRefreshing = $0 }
+      .sink { [weak self] in self?.refreshingProviders = $0 }
       .store(in: &self.cancellables)
     if let accountManager {
       accountManager.$currentSubscription

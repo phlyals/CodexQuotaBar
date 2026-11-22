@@ -4,6 +4,35 @@ import XCTest
 @testable import QuotaFloat
 
 final class CodexQuotaMappingTests: XCTestCase {
+  func testAgyQuotaMatchesOfficialWholePercentages() throws {
+    let now = Date(timeIntervalSince1970: 10_000)
+    let snapshot = try CodexBarQuotaFetcher.parseAgyUsageJSON(
+      #"""
+      {
+        "status": "SUCCESS",
+        "response": "Gemini Models\tWeekly Limit Remaining\t50%\nGemini Models\tFive Hour Limit Remaining\t42%",
+        "command": { "name": "usage", "data": { "groups": [
+          { "name": "Gemini Models", "buckets": [
+            { "id": "gemini-weekly", "name": "Weekly Limit Remaining", "window": "weekly",
+              "remaining_fraction": 0.4997, "reset_time": "2026-11-28T00:00:00Z" },
+            { "id": "gemini-5h", "name": "Five Hour Limit Remaining", "window": "5h",
+              "remaining_fraction": 0.4212, "reset_time": "2026-11-22T00:00:00Z" }
+          ] },
+          { "name": "Claude and GPT models", "buckets": [
+            { "id": "3p-5h", "name": "Five Hour Limit Remaining", "window": "5h", "remaining_fraction": 1 }
+          ] }
+        ] } }
+      }
+      """#, now: now)
+
+    XCTAssertEqual(snapshot.session?.remainingPercent, 42)
+    XCTAssertEqual(snapshot.weekly?.remainingPercent, 50)
+    XCTAssertEqual(snapshot.extraWindows?.first?.window.remainingPercent, 100)
+    XCTAssertEqual(snapshot.session?.windowMinutes, 300)
+    XCTAssertEqual(snapshot.weekly?.windowMinutes, 10_080)
+    XCTAssertEqual(snapshot.updatedAt, now)
+  }
+
   func testResetOnlyAndUnlimitedAreValidResponses() throws {
     let now = Date()
     let credentials = CodexOAuthCredentials(

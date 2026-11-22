@@ -39,6 +39,15 @@ struct StatusBarQuotaDisplay: Equatable {
   }
 }
 
+enum QuotaUpdateTimeFormatter {
+  static func string(from date: Date) -> String {
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.dateFormat = "HH:mm:ss"
+    return formatter.string(from: date)
+  }
+}
+
 enum StatusBarQuotaFormatter {
   static func display(for snapshot: QuotaSnapshot?, isRefreshing: Bool) -> StatusBarQuotaDisplay {
     self.display(codex: snapshot, google: nil, isRefreshing: isRefreshing, includeGoogle: false)
@@ -129,6 +138,7 @@ enum StatusBarQuotaFormatter {
       if google.hasQuotaData {
         lines.append("Google Gemini 5h：\(Self.percent(google.session))，\(Self.resetText(google.session))")
         lines.append("Google Gemini 周额度：\(Self.percent(google.weekly))，\(Self.resetText(google.weekly))")
+        lines.append("Google 更新：\(QuotaUpdateTimeFormatter.string(from: google.updatedAt))")
       } else if let msg = google.message {
         lines.append("Google：\(msg)")
       }
@@ -266,6 +276,7 @@ final class StatusBarQuotaController: NSObject, NSMenuDelegate, NSPopoverDelegat
     if popover.isShown {
       popover.performClose(nil)
     } else {
+      self.store.refreshIfStale(maxAge: 15)
       self.dashboardStore.tick(menuOpened: true)
       Task { [weak self] in await self?.assistant.notifications.refreshPermission() }
       popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
@@ -285,7 +296,7 @@ final class StatusBarQuotaController: NSObject, NSMenuDelegate, NSPopoverDelegat
 
   private func observeStore() {
     self.store.$snapshots
-      .combineLatest(self.store.$isRefreshing)
+      .combineLatest(self.store.$refreshingProviders)
       .receive(on: DispatchQueue.main)
       .sink { [weak self] _ in
         self?.update()
@@ -312,7 +323,8 @@ final class StatusBarQuotaController: NSObject, NSMenuDelegate, NSPopoverDelegat
     let google = self.store.snapshot(for: .antigravity)
     self.statusView.update(
       StatusBarQuotaFormatter.display(
-        codex: snapshot, google: google, isRefreshing: self.store.isRefreshing))
+        codex: snapshot, google: google,
+        isRefreshing: self.store.refreshingProviders.contains(.codex)))
     self.statusItem.length = self.statusView.currentWidth
     self.statusItem.button?.image = self.statusView.renderedImage()
     self.statusItem.button?.toolTip = StatusBarQuotaFormatter.detailLines(
