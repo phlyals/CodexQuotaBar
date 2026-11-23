@@ -188,8 +188,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     NSApplication.shared.setActivationPolicy(.accessory)
-    self.contentPreferences.setSelectedProviders([.codex, .antigravity])
-    self.store.setActiveProviders([.codex, .antigravity])
+    let initialProviders: Set<QuotaProvider> =
+      StatusBarQuotaController.isGoogleQuotaEnabled ? [.codex, .antigravity] : [.codex]
+    self.contentPreferences.setSelectedProviders(initialProviders)
+    self.store.setActiveProviders(initialProviders)
     self.codexAuthMonitor = CodexAuthMonitor { [weak self] change in
       guard let self else { return }
       self.accountManager.synchronizeLiveCredentials()

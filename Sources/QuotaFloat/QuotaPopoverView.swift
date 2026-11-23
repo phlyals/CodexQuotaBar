@@ -18,6 +18,8 @@ struct QuotaPopoverActions {
   let onToggleLaunchAtLogin: () -> Void
   let isLaunchAtLoginEnabled: () -> Bool
   let launchAtLoginRequiresApproval: () -> Bool
+  let isGoogleQuotaEnabled: () -> Bool
+  let onToggleGoogleQuota: (Bool) -> Void
   let beforeNotificationPermission: @MainActor () async -> Void
   let onNotificationSettings: () -> Void
   let onQuit: () -> Void
@@ -37,6 +39,7 @@ struct QuotaPopoverView: View {
   @State private var pinnedDayID: String?
   @State private var confirmClear = false
   @State private var launchAtLoginOn = false
+  @State private var googleQuotaOn = true
   @AppStorage("quotaReservePercent") private var reserve = 10.0
   @AppStorage("quotaWorkHours") private var workHours = 3.0
 
@@ -50,6 +53,7 @@ struct QuotaPopoverView: View {
     self.notifications = model.notifications
     self.actions = actions
     self._launchAtLoginOn = State(initialValue: actions.isLaunchAtLoginEnabled())
+    self._googleQuotaOn = State(initialValue: actions.isGoogleQuotaEnabled())
   }
 
   var body: some View {
@@ -85,6 +89,7 @@ struct QuotaPopoverView: View {
     .background(.ultraThinMaterial)
     .onAppear {
       self.launchAtLoginOn = self.actions.isLaunchAtLoginEnabled()
+      self.googleQuotaOn = self.actions.isGoogleQuotaEnabled()
     }
     .onChange(of: self.usageDays.map(\.id)) { _, ids in
       if let pinnedDayID, !ids.contains(pinnedDayID) { self.pinnedDayID = nil }
@@ -279,7 +284,9 @@ struct QuotaPopoverView: View {
       }
 
       // Google (Antigravity) Quotas Card
-      self.googleQuotaCard
+      if self.googleQuotaOn {
+        self.googleQuotaCard
+      }
 
       // Compact Local Usage Section
       self.localUsageCard
@@ -765,6 +772,22 @@ struct QuotaPopoverView: View {
               self.launchAtLoginOn = self.actions.isLaunchAtLoginEnabled()
             })
         )
+
+        VStack(alignment: .leading, spacing: 2) {
+          Toggle(
+            "显示 Google (Antigravity) 额度",
+            isOn: Binding(
+              get: { self.googleQuotaOn },
+              set: { newValue in
+                self.googleQuotaOn = newValue
+                self.actions.onToggleGoogleQuota(newValue)
+              })
+          )
+          Text("后台每 5 分钟刷新且已禁止弹浏览器登录；切号时可临时关闭")
+            .font(.system(size: 10))
+            .foregroundStyle(.secondary)
+            .padding(.leading, 18)
+        }
 
         Toggle(
           "额度预警提醒",

@@ -169,6 +169,20 @@ enum StatusBarQuotaFormatter {
 
 @MainActor
 final class StatusBarQuotaController: NSObject, NSMenuDelegate, NSPopoverDelegate {
+  static let googleQuotaEnabledKey = "QuotaFloatGoogleQuotaEnabled"
+
+  static var isGoogleQuotaEnabled: Bool {
+    get {
+      if UserDefaults.standard.object(forKey: Self.googleQuotaEnabledKey) == nil {
+        return true
+      }
+      return UserDefaults.standard.bool(forKey: Self.googleQuotaEnabledKey)
+    }
+    set {
+      UserDefaults.standard.set(newValue, forKey: Self.googleQuotaEnabledKey)
+    }
+  }
+
   private let store: QuotaStore
   private let accountManager: CodexAccountManager
   private let dashboardStore: CodexDashboardStore
@@ -253,6 +267,8 @@ final class StatusBarQuotaController: NSObject, NSMenuDelegate, NSPopoverDelegat
       launchAtLoginRequiresApproval: { [weak self] in
         self?.launchAtLoginController.requiresApproval ?? false
       },
+      isGoogleQuotaEnabled: { Self.isGoogleQuotaEnabled },
+      onToggleGoogleQuota: { [weak self] enabled in self?.setGoogleQuotaEnabled(enabled) },
       beforeNotificationPermission: { [weak self] in
         await self?.prepareForNotificationPermission()
       },
@@ -318,13 +334,21 @@ final class StatusBarQuotaController: NSObject, NSMenuDelegate, NSPopoverDelegat
       .store(in: &self.cancellables)
   }
 
+  private func setGoogleQuotaEnabled(_ enabled: Bool) {
+    Self.isGoogleQuotaEnabled = enabled
+    let providers: Set<QuotaProvider> = enabled ? [.codex, .antigravity] : [.codex]
+    self.store.setActiveProviders(providers)
+    self.update()
+  }
+
   private func update() {
     let snapshot = self.store.snapshot(for: .codex)
-    let google = self.store.snapshot(for: .antigravity)
+    let google = Self.isGoogleQuotaEnabled ? self.store.snapshot(for: .antigravity) : nil
     self.statusView.update(
       StatusBarQuotaFormatter.display(
         codex: snapshot, google: google,
-        isRefreshing: self.store.refreshingProviders.contains(.codex)))
+        isRefreshing: self.store.refreshingProviders.contains(.codex),
+        includeGoogle: Self.isGoogleQuotaEnabled))
     self.statusItem.length = self.statusView.currentWidth
     self.statusItem.button?.image = self.statusView.renderedImage()
     self.statusItem.button?.toolTip = StatusBarQuotaFormatter.detailLines(

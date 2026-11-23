@@ -92,8 +92,14 @@ struct CodexBarQuotaFetcher: QuotaFetching {
     }
 
     if let agyPath = Self.resolveAgyBinary(environment: environment) {
+      let guardDir = try Self.makeBrowserBlockShimDirectory()
+      defer { try? FileManager.default.removeItem(at: guardDir) }
       var cliEnv = environment
       cliEnv["AGY_CLI_DISABLE_AUTO_UPDATE"] = "true"
+      // Prevent passive agy /usage probes from ever opening a browser OAuth flow
+      // or overwriting the active Antigravity desktop account in Keychain.
+      cliEnv["BROWSER"] = "/usr/bin/false"
+      cliEnv["PATH"] = guardDir.path + ":" + (cliEnv["PATH"] ?? "/usr/bin:/bin")
       let result = try await SubprocessRunner.run(
         binary: agyPath,
         arguments: ["-p", "/usage", "--output-format", "json"],
@@ -126,6 +132,23 @@ struct CodexBarQuotaFetcher: QuotaFetching {
     let result = try await AntigravityProviderDescriptor.descriptor.fetch(context: context)
     try Task.checkCancellation()
     return try Self.mapAntigravityUsage(result.usage, source: result.sourceLabel)
+  }
+
+  private static func makeBrowserBlockShimDirectory() throws -> URL {
+    let fileManager = FileManager.default
+    let dir = fileManager.temporaryDirectory
+      .appendingPathComponent("QuotaFloat-agy-guard-\(UUID().uuidString)", isDirectory: true)
+    try fileManager.createDirectory(
+      at: dir, withIntermediateDirectories: true,
+      attributes: [.posixPermissions: NSNumber(value: Int16(0o700))])
+    let shim = Data("#!/bin/sh\nexit 1\n".utf8)
+    for name in ["open", "xdg-open"] {
+      let url = dir.appendingPathComponent(name)
+      try shim.write(to: url, options: .atomic)
+      try fileManager.setAttributes(
+        [.posixPermissions: NSNumber(value: Int16(0o700))], ofItemAtPath: url.path)
+    }
+    return dir
   }
 
   private static func resolveAgyBinary(environment: [String: String]) -> String? {

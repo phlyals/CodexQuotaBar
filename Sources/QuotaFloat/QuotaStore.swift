@@ -21,6 +21,7 @@ enum QuotaRefreshPolicy {
 @MainActor
 final class QuotaStore: ObservableObject {
   static let defaultRefreshInterval: TimeInterval = 60
+  static let antigravityRefreshInterval: TimeInterval = 300
   static let defaultStaleAfter: TimeInterval = 300
 
   @Published private(set) var snapshots: [QuotaProvider: QuotaSnapshot] = [:]
@@ -92,7 +93,21 @@ final class QuotaStore: ObservableObject {
     guard providers != self.activeProviders else { return }
 
     let newlyEnabled = providers.subtracting(self.activeProviders)
+    let newlyDisabled = self.activeProviders.subtracting(providers)
     self.activeProviders = providers
+
+    if !newlyDisabled.isEmpty {
+      for provider in newlyDisabled {
+        self.inFlightTasks[provider]?.cancel()
+        self.inFlightTasks.removeValue(forKey: provider)
+        self.inFlightTokens.removeValue(forKey: provider)
+        self.refreshingProviders.remove(provider)
+        self.snapshots.removeValue(forKey: provider)
+        self.lastAttemptByProvider.removeValue(forKey: provider)
+        self.lastCompletionByProvider.removeValue(forKey: provider)
+      }
+      self.cacheStore.save(Array(self.snapshots.values))
+    }
 
     guard self.hasStarted else { return }
     self.refresh(providers: newlyEnabled, force: false)
@@ -110,7 +125,10 @@ final class QuotaStore: ObservableObject {
       let lastRefresh = max(
         self.lastAttemptByProvider[provider] ?? .distantPast,
         self.lastCompletionByProvider[provider] ?? .distantPast)
-      return now.timeIntervalSince(lastRefresh) >= maxAge
+      let effectiveMaxAge =
+        (provider == .antigravity && self.refreshInterval == Self.defaultRefreshInterval)
+        ? max(maxAge, 45) : maxAge
+      return now.timeIntervalSince(lastRefresh) >= effectiveMaxAge
     }
     guard !due.isEmpty else { return }
     self.refresh(providers: due, force: true)
@@ -324,8 +342,11 @@ final class QuotaStore: ObservableObject {
   }
 
   private func retryInterval(_ provider: QuotaProvider) -> TimeInterval {
-    min(
-      900, self.refreshInterval * pow(2, Double(min(3, self.failureCounts[provider, default: 0]))))
+    let baseInterval =
+      (provider == .antigravity && self.refreshInterval == Self.defaultRefreshInterval)
+      ? Self.antigravityRefreshInterval : self.refreshInterval
+    return min(
+      900, baseInterval * pow(2, Double(min(3, self.failureCounts[provider, default: 0]))))
   }
 
   private func applyFailure(provider: QuotaProvider, message: String, now: Date) {
