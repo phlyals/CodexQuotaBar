@@ -148,6 +148,7 @@ final class StatusBarQuotaFormatterTests: XCTestCase {
     formatter.locale = Locale(identifier: "en_US_POSIX")
     formatter.dateFormat = "HH:mm:ss"
     let lines = StatusBarQuotaFormatter.detailLines(for: codex, google: google)
+    XCTAssertTrue(lines.contains("Google 账号：dev@example.com"))
     XCTAssertTrue(lines.contains("Google 更新：\(formatter.string(from: google.updatedAt))"))
   }
 

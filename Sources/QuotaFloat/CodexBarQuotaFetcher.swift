@@ -7,9 +7,12 @@ protocol QuotaFetching: Sendable {
 
 enum QuotaFetchError: LocalizedError, Sendable {
   case noQuotaWindows(QuotaProvider)
+  case unsupportedAgyVersion
 
   var errorDescription: String? {
     switch self {
+    case .unsupportedAgyVersion:
+      "查询额度需要 agy 1.1.11 或以上版本，请更新 Antigravity CLI。"
     case .noQuotaWindows(let provider):
       "\(provider.displayName) 没有返回 5 小时或周额度。"
     }
@@ -19,8 +22,14 @@ enum QuotaFetchError: LocalizedError, Sendable {
 struct CodexBarQuotaFetcher: QuotaFetching {
   private let baseEnvironment: [String: String]
 
-  init(environment: [String: String] = ProcessInfo.processInfo.environment) {
+  private let googleAccountManager: GoogleAccountManager?
+
+  init(
+    environment: [String: String] = ProcessInfo.processInfo.environment,
+    googleAccountManager: GoogleAccountManager? = nil
+  ) {
     self.baseEnvironment = environment
+    self.googleAccountManager = googleAccountManager
   }
 
   func fetch(_ provider: QuotaProvider) async throws -> QuotaSnapshot {
@@ -28,7 +37,8 @@ struct CodexBarQuotaFetcher: QuotaFetching {
     case .codex:
       return try await self.fetchCodex()
     case .antigravity:
-      return try await self.fetchAntigravity()
+      return try await AntigravityQuotaFetcher(environment: self.baseEnvironment).fetch(
+        manager: self.googleAccountManager)
     }
   }
 
@@ -81,100 +91,6 @@ struct CodexBarQuotaFetcher: QuotaFetching {
     return snapshot
   }
 
-  private func fetchAntigravity() async throws -> QuotaSnapshot {
-    var environment = self.baseEnvironment
-    let existingPath = environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
-    let extraPaths = ["/opt/homebrew/bin", "/usr/local/bin"]
-    let existingComponents = Set(existingPath.split(separator: ":").map(String.init))
-    let missing = extraPaths.filter { !existingComponents.contains($0) }
-    if !missing.isEmpty {
-      environment["PATH"] = (missing + [existingPath]).joined(separator: ":")
-    }
-
-    if let agyPath = Self.resolveAgyBinary(environment: environment) {
-      let guardDir = try Self.makeBrowserBlockShimDirectory()
-      defer { try? FileManager.default.removeItem(at: guardDir) }
-      var cliEnv = environment
-      cliEnv["AGY_CLI_DISABLE_AUTO_UPDATE"] = "true"
-      // Prevent passive agy /usage probes from ever opening a browser OAuth flow
-      // or overwriting the active Antigravity desktop account in Keychain.
-      cliEnv["BROWSER"] = "/usr/bin/false"
-      cliEnv["PATH"] = guardDir.path + ":" + (cliEnv["PATH"] ?? "/usr/bin:/bin")
-      let result = try await SubprocessRunner.run(
-        binary: agyPath,
-        arguments: ["-p", "/usage", "--output-format", "json"],
-        environment: cliEnv,
-        timeout: 30,
-        label: "antigravity-agy-usage")
-      try Task.checkCancellation()
-      if let snapshot = try? Self.parseAgyUsageJSON(result.stdout) {
-        return snapshot
-      }
-    }
-
-    let browserDetection = BrowserDetection()
-    let context = ProviderFetchContext(
-      runtime: .app,
-      sourceMode: .auto,
-      includeCredits: false,
-      includeOptionalUsage: true,
-      webTimeout: 10,
-      webDebugDumpHTML: false,
-      verbose: false,
-      env: environment,
-      settings: nil,
-      fetcher: UsageFetcher(environment: environment),
-      claudeFetcher: ClaudeUsageFetcher(
-        browserDetection: browserDetection, environment: environment),
-      browserDetection: browserDetection,
-      persistsCLISessions: false,
-      persistentCLISessionIdleWindow: nil)
-    let result = try await AntigravityProviderDescriptor.descriptor.fetch(context: context)
-    try Task.checkCancellation()
-    return try Self.mapAntigravityUsage(result.usage, source: result.sourceLabel)
-  }
-
-  private static func makeBrowserBlockShimDirectory() throws -> URL {
-    let fileManager = FileManager.default
-    let dir = fileManager.temporaryDirectory
-      .appendingPathComponent("QuotaFloat-agy-guard-\(UUID().uuidString)", isDirectory: true)
-    try fileManager.createDirectory(
-      at: dir, withIntermediateDirectories: true,
-      attributes: [.posixPermissions: NSNumber(value: Int16(0o700))])
-    let shim = Data("#!/bin/sh\nexit 1\n".utf8)
-    for name in ["open", "xdg-open"] {
-      let url = dir.appendingPathComponent(name)
-      try shim.write(to: url, options: .atomic)
-      try fileManager.setAttributes(
-        [.posixPermissions: NSNumber(value: Int16(0o700))], ofItemAtPath: url.path)
-    }
-    return dir
-  }
-
-  private static func resolveAgyBinary(environment: [String: String]) -> String? {
-    let fileManager = FileManager.default
-    var candidates: [String] = []
-    if let explicit = environment["ANTIGRAVITY_CLI_PATH"], !explicit.isEmpty {
-      candidates.append(explicit)
-    }
-    candidates.append(contentsOf: [
-      "/opt/homebrew/bin/agy",
-      "/usr/local/bin/agy",
-      fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/agy").path,
-    ])
-    if let pathEnv = environment["PATH"] {
-      for dir in pathEnv.split(separator: ":") {
-        candidates.append(String(dir) + "/agy")
-      }
-    }
-    for path in candidates {
-      if fileManager.isExecutableFile(atPath: path) {
-        return path
-      }
-    }
-    return nil
-  }
-
   private struct AgyUsageEnvelope: Decodable {
     struct CommandPayload: Decodable {
       struct DataPayload: Decodable {
@@ -182,39 +98,52 @@ struct CodexBarQuotaFetcher: QuotaFetching {
           struct Bucket: Decodable {
             let id: String
             let name: String
+            let disabled: Bool?
             let window: String?
             let remainingFraction: Double?
             let resetTime: String?
 
-            enum CodingKeys: String, CodingKey {
-              case id, name, window
-              case remainingFraction = "remaining_fraction"
-              case resetTime = "reset_time"
-            }
           }
           let name: String
           let buckets: [Bucket]
         }
         let groups: [Group]
+        let email: String?
+        let accountEmail: String?
       }
       let name: String?
       let data: DataPayload?
     }
     let status: String?
+    let email: String?
+    let accountEmail: String?
     let command: CommandPayload?
   }
 
-  static func parseAgyUsageJSON(_ stdout: String, now: Date = Date()) throws -> QuotaSnapshot {
+  static func parseAgyUsageJSON(
+    _ stdout: String, email: String? = nil, plan: String? = nil, now: Date = Date()
+  ) throws -> QuotaSnapshot {
     let trimmed = stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard let startIdx = trimmed.firstIndex(of: "{"), let endIdx = trimmed.lastIndex(of: "}") else {
+    guard let startIdx = trimmed.firstIndex(of: "{"), let endIdx = trimmed.lastIndex(of: "}"),
+      startIdx <= endIdx else {
       throw QuotaFetchError.noQuotaWindows(.antigravity)
     }
     let jsonSlice = String(trimmed[startIdx...endIdx])
-    let envelope = try JSONDecoder().decode(AgyUsageEnvelope.self, from: Data(jsonSlice.utf8))
-    guard envelope.status?.uppercased() == "SUCCESS",
+    let decoder = JSONDecoder()
+    decoder.keyDecodingStrategy = .convertFromSnakeCase
+    let envelope = try decoder.decode(AgyUsageEnvelope.self, from: Data(jsonSlice.utf8))
+    guard envelope.status?.uppercased() == "SUCCESS", envelope.command?.name == "usage",
       let groups = envelope.command?.data?.groups, !groups.isEmpty
     else {
       throw QuotaFetchError.noQuotaWindows(.antigravity)
+    }
+
+    if let email {
+      let identities = [envelope.email, envelope.accountEmail, envelope.command?.data?.email,
+        envelope.command?.data?.accountEmail].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+      guard identities.allSatisfy({ $0.isEmpty || $0.caseInsensitiveCompare(email) == .orderedSame }) else {
+        throw GoogleAccountError.invalidIdentity
+      }
     }
 
     let isoFormatter = ISO8601DateFormatter()
@@ -223,14 +152,15 @@ struct CodexBarQuotaFetcher: QuotaFetching {
     fallbackISO.formatOptions = [.withInternetDateTime]
 
     func makeWindow(_ bucket: AgyUsageEnvelope.CommandPayload.DataPayload.Group.Bucket) -> QuotaWindow? {
-      guard let fraction = bucket.remainingFraction, fraction.isFinite else { return nil }
+      guard bucket.disabled != true, let fraction = bucket.remainingFraction,
+        (0...1).contains(fraction) else { return nil }
       // agy /usage and the Antigravity settings page show the nearest whole percent.
-      let remaining = min(100, max(0, fraction * 100)).rounded(.toNearestOrAwayFromZero)
+      let remaining = (fraction * 100).rounded()
       let resetDate = bucket.resetTime.flatMap { isoFormatter.date(from: $0) ?? fallbackISO.date(from: $0) }
       let minutes: Int? =
-        switch bucket.window?.lowercased() {
-        case "5h": 300
-        case "weekly": 10_080
+        switch (bucket.window?.lowercased(), bucket.id.lowercased()) {
+        case ("5h", _), (nil, "gemini-5h"): 300
+        case ("weekly", _), (nil, "gemini-weekly"): 10_080
         default: nil
         }
       return QuotaWindow(usedPercent: 100 - remaining, resetsAt: resetDate, windowMinutes: minutes)
@@ -244,9 +174,9 @@ struct CodexBarQuotaFetcher: QuotaFetching {
       for bucket in group.buckets {
         guard let window = makeWindow(bucket) else { continue }
         let id = bucket.id.lowercased()
-        if id == "gemini-5h" {
+        if id == "gemini-5h", window.windowMinutes == 300 {
           session = window
-        } else if id == "gemini-weekly" {
+        } else if id == "gemini-weekly", window.windowMinutes == 10_080 {
           weekly = window
         } else {
           let rawTitle = "\(group.name) \(bucket.name)"
@@ -265,79 +195,49 @@ struct CodexBarQuotaFetcher: QuotaFetching {
       weekly: weekly,
       extraWindows: extras.isEmpty ? nil : extras,
       resetCredits: nil,
-      accountEmail: nil,
-      accountKey: "antigravity-cli",
-      accountPlan: nil,
-      source: "agy-cli",
+      accountEmail: email,
+      accountKey: email?.lowercased() ?? "antigravity-cli",
+      accountPlan: plan,
+      source: email == nil ? GoogleQuotaSource.ambientCLI : GoogleQuotaSource.scopedCLI,
       updatedAt: now,
       freshness: .fresh,
       message: nil)
-    guard snapshot.hasQuotaData else { throw QuotaFetchError.noQuotaWindows(.antigravity) }
+    guard session != nil || weekly != nil else { throw QuotaFetchError.noQuotaWindows(.antigravity) }
     return snapshot
   }
 
-  static func mapAntigravityUsage(
-    _ usage: UsageSnapshot,
-    source: String,
-    now: Date = Date()
-  ) throws -> QuotaSnapshot {
-    if source.lowercased() == "offline"
-      || usage.identity?.loginMethod?.lowercased() == "offline"
-    {
-      throw QuotaFetchError.noQuotaWindows(.antigravity)
-    }
-
-    let rawExtras = (usage.extraRateWindows ?? []).filter { $0.usageKnown }
-
-    // Prefer Gemini 5h for session and Gemini Weekly for weekly (not 3P Claude/GPT).
-    let gemini5hExtra = rawExtras.first { named in
-      let id = named.id.lowercased()
-      let title = named.title.lowercased()
-      return id.contains("gemini-5h")
-        || (title.contains("gemini") && !title.contains("argon")
-          && (named.window.windowMinutes ?? 0) > 0 && (named.window.windowMinutes ?? 0) <= 6 * 60)
-    }
-    let geminiWeeklyExtra = rawExtras.first { named in
-      let id = named.id.lowercased()
-      let title = named.title.lowercased()
-      return id.contains("gemini-weekly")
-        || (title.contains("gemini") && !title.contains("argon")
-          && (named.window.windowMinutes ?? 0) >= 6 * 24 * 60)
-    }
-
-    let session =
-      (gemini5hExtra?.window ?? usage.primary).flatMap { Self.mapWindow($0, assumedMinutes: nil) }
-    let weekly =
-      (geminiWeeklyExtra?.window ?? (gemini5hExtra == nil ? usage.secondary : nil)).flatMap {
-        Self.mapWindow($0, assumedMinutes: nil)
+  static func mapAntigravityUsage(_ usage: UsageSnapshot, email: String) throws -> QuotaSnapshot {
+    let windows = (usage.extraRateWindows ?? []).filter { $0.usageKnown }
+    var session: QuotaWindow?
+    var weekly: QuotaWindow?
+    var extras: [QuotaNamedWindow] = []
+    for named in windows {
+      guard let valid = Self.mapWindow(named.window, assumedMinutes: nil) else { continue }
+      let window = QuotaWindow(
+        usedPercent: 100 - valid.remainingPercent.rounded(), resetsAt: valid.resetsAt,
+        windowMinutes: valid.windowMinutes)
+      // CodexBar's primary/secondary may represent a model family, not a time window.
+      let id = named.id.lowercased().replacingOccurrences(of: "_", with: "-")
+      switch (id, window.windowMinutes) {
+      case ("antigravity-quota-summary-gemini-5h", 300),
+           ("antigravity-quota-summary-gemini-session", 300),
+           ("antigravity-quota-summary-gemini-5-hour", 300),
+           ("antigravity-quota-summary-gemini-five-hour", 300):
+        session = window
+      case ("antigravity-quota-summary-gemini-weekly", 10_080):
+        weekly = window
+      default:
+        extras.append(QuotaNamedWindow(
+          id: named.id, title: Self.localizedAntigravityTitle(id: named.id, rawTitle: named.title),
+          window: window))
       }
-
-    let consumedIDs = Set([gemini5hExtra?.id, geminiWeeklyExtra?.id].compactMap { $0 })
-    let extras: [QuotaNamedWindow] = rawExtras.compactMap { named in
-      guard !consumedIDs.contains(named.id) else { return nil }
-      guard let window = Self.mapWindow(named.window, assumedMinutes: nil) else { return nil }
-      return QuotaNamedWindow(
-        id: named.id,
-        title: Self.localizedAntigravityTitle(id: named.id, rawTitle: named.title),
-        window: window)
     }
-    let email = usage.identity?.accountEmail
-    let plan = usage.identity?.loginMethod
-    let snapshot = QuotaSnapshot(
-      provider: .antigravity,
-      session: session,
-      weekly: weekly,
-      extraWindows: extras.isEmpty ? nil : extras,
-      resetCredits: nil,
-      accountEmail: email,
-      accountKey: email ?? "antigravity",
-      accountPlan: plan,
-      source: source,
-      updatedAt: now,
-      freshness: .fresh,
-      message: nil)
-    guard snapshot.hasQuotaData else { throw QuotaFetchError.noQuotaWindows(.antigravity) }
-    return snapshot
+    guard session != nil || weekly != nil else { throw QuotaFetchError.noQuotaWindows(.antigravity) }
+    return QuotaSnapshot(
+      provider: .antigravity, session: session, weekly: weekly,
+      extraWindows: extras.isEmpty ? nil : extras, resetCredits: nil,
+      accountEmail: email, accountKey: email.lowercased(), accountPlan: usage.identity?.loginMethod,
+      source: GoogleQuotaSource.remote, updatedAt: usage.updatedAt, freshness: .fresh, message: nil)
   }
 
   private static func localizedAntigravityTitle(id: String, rawTitle: String) -> String {

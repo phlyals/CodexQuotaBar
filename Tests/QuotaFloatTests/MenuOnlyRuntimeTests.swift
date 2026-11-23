@@ -11,7 +11,7 @@ final class MenuOnlyRuntimeTests: XCTestCase {
     defer { fixture.cleanUp() }
     let controller = StatusBarQuotaController(
       store: fixture.store, accountManager: fixture.accounts,
-      assistant: fixture.model, startsAutomatically: false)
+      googleAccounts: fixture.googleAccounts, assistant: fixture.model, startsAutomatically: false)
     defer { controller.stop() }
     var current = controller.makeMenu(snapshot: nil)
     for _ in 0..<20 {
@@ -37,7 +37,7 @@ final class MenuOnlyRuntimeTests: XCTestCase {
     defer { fixture.cleanUp() }
     let controller = StatusBarQuotaController(
       store: fixture.store, accountManager: fixture.accounts,
-      assistant: fixture.model, startsAutomatically: false)
+      googleAccounts: fixture.googleAccounts, assistant: fixture.model, startsAutomatically: false)
     defer { controller.stop() }
     var current: NSMenu!
     var mounted: [(NSMenuItem, NSView, NSView)] = []
@@ -79,7 +79,7 @@ final class MenuOnlyRuntimeTests: XCTestCase {
     try await fixture.accounts.addAccount()
     let controller = StatusBarQuotaController(
       store: fixture.store, accountManager: fixture.accounts,
-      assistant: fixture.model, startsAutomatically: false)
+      googleAccounts: fixture.googleAccounts, assistant: fixture.model, startsAutomatically: false)
     defer { controller.stop() }
     // Drain initial Combine deliveries before exercising menus outside the status item.
     try await Task.sleep(for: .milliseconds(100))
@@ -167,7 +167,7 @@ final class MenuOnlyRuntimeTests: XCTestCase {
     try await fixture.accounts.addAccount()
     let controller = StatusBarQuotaController(
       store: fixture.store, accountManager: fixture.accounts,
-      assistant: fixture.model, startsAutomatically: false)
+      googleAccounts: fixture.googleAccounts, assistant: fixture.model, startsAutomatically: false)
     defer { controller.stop() }
 
     let menu = controller.makeMenu(snapshot: nil)
@@ -202,7 +202,7 @@ final class MenuOnlyRuntimeTests: XCTestCase {
     defer { fixture.cleanUp() }
     let controller = StatusBarQuotaController(
       store: fixture.store, accountManager: fixture.accounts,
-      assistant: fixture.model, startsAutomatically: false)
+      googleAccounts: fixture.googleAccounts, assistant: fixture.model, startsAutomatically: false)
     defer { controller.stop() }
     try await Task.sleep(for: .milliseconds(100))
     let root = controller.makeMenu(snapshot: nil)
@@ -286,7 +286,7 @@ final class MenuOnlyRuntimeTests: XCTestCase {
     let windowCount = NSApplication.shared.windows.filter { $0.styleMask.contains(.titled) }.count
     let controller = StatusBarQuotaController(
       store: fixture.store, accountManager: fixture.accounts,
-      assistant: fixture.model, startsAutomatically: false)
+      googleAccounts: fixture.googleAccounts, assistant: fixture.model, startsAutomatically: false)
     defer { controller.stop() }
     let first = controller.makeMenu(snapshot: nil)
     let dashboard = try XCTUnwrap(first.items.first?.view)
@@ -352,6 +352,7 @@ final class MenuOnlyRuntimeTests: XCTestCase {
 private final class MenuOnlyFixture {
   let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
   let defaults: UserDefaults
+  let googleAccounts: GoogleAccountManager
   let accounts: CodexAccountManager
   let store: QuotaStore
   let model: QuotaAssistantModel
@@ -370,6 +371,7 @@ private final class MenuOnlyFixture {
         "refresh_token": "fixture-only", "id_token": "header.\(payload).signature",
       ]
     ])
+    googleAccounts = GoogleAccountManager(fileURL: root.appendingPathComponent("google-accounts.json"))
     accounts = CodexAccountManager(
       paths: .init(
         applicationSupportRoot: root, managedHomesRoot: root.appendingPathComponent("homes"),

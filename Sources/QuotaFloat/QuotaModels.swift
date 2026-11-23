@@ -122,6 +122,13 @@ struct QuotaNamedWindow: Codable, Equatable, Identifiable, Sendable {
   let window: QuotaWindow
 }
 
+enum GoogleQuotaSource {
+  static let remote = "google-oauth-remote"
+  static let remoteAndScopedCLI = "google-oauth-remote+agy-cli-scoped"
+  static let scopedCLI = "agy-cli-scoped"
+  static let ambientCLI = "agy-cli-ambient"
+}
+
 struct QuotaSnapshot: Codable, Equatable, Identifiable, Sendable {
   let provider: QuotaProvider
   let session: QuotaWindow?

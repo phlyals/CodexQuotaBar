@@ -9,14 +9,14 @@
 </p>
 
 一个原生 macOS 菜单栏工具，在不打开 Codex 窗口的情况下查看 Codex 额度、订阅周期和本机用量。
-它只显示 Codex，不包含 Claude、Gemini 或其他平台入口。
+也可查看 Google（Antigravity）额度，并为额度查询单独绑定和切换 Google 邮箱。
 
 [English summary](#english-summary) · [安装](#安装) · [从源码构建](#从源码构建) · [隐私](#隐私与数据边界)
 
 ## 功能亮点
 
 - **菜单栏优先**：顶部显示渐变 `C` 图标，以及 5 小时和周额度的简短状态。
-- **Codex-only 面板**：显示每周、5 小时、Codex Spark Weekly、Credits 和重置时间。
+- **Codex 额度**：显示每周、5 小时、Codex Spark Weekly、Credits 和重置时间。
 - **真实数据状态**：区分实时、缓存、过期和登录失效，不用虚假的 `99%` 或 `100%` 填充缺失数据。
 - **订阅有效期**：只读查询当前账号的 ChatGPT 订阅接口，统一显示核验日期和来源；接口失败会给出原因，登录记录不冒充实时账单、首次购买或自动续费日期。
 - **多账号切换**：保存多个 Codex 账号，切换时同步 live 凭据、取消旧刷新任务并校验目标账号。
@@ -66,6 +66,8 @@ cli_auth_credentials_store = "file"
 ```
 
 ## 账号与订阅信息
+
+在概览页展开“Google · Antigravity → 绑定账号 → 添加 Google 账号…”，在浏览器选择邮箱并授权。卡片会显示绑定的邮箱。再次展开可以切换或移除账号。切换只影响 QuotaFloat 的额度查询，桌面端与全局 `agy` 保持各自的登录。选择“全局 agy（不指定邮箱）”后，额度取决于全局 CLI 当前的登录。
 
 在菜单中选择“添加 Codex 账号…”即可启动隔离的 Codex 登录流程。已保存账号放在本机应用支持目录，
 切换时会以安全权限原子替换 live `auth.json`，并刷新额度和本机用量。
@@ -131,7 +133,7 @@ Sources/QuotaFloat/
 ## 隐私与数据边界
 
 CodexQuotaBar 不提供账号系统，不上传凭证、额度或使用数据，也不包含遥测和广告。认证文件、账号副本、
-额度缓存和本机用量数据都留在当前 Mac 上。额度请求连接 Codex/OpenAI；用量定价来自 CodexBar 的价格数据。
+额度缓存和本机用量数据都留在当前 Mac 上。额度请求分别连接 OpenAI 和 Google 官方服务。用量定价来自 CodexBar 的价格数据。
 可选公开消息读取会连接上述 RSS 和 X 的公开嵌入服务，服务能看到网络地址。诊断导出先预览，默认不含邮箱、账号标识、凭据和本地路径。
 
 详细说明见 [PRIVACY.md](PRIVACY.md)。第三方依赖和许可证说明见 [OPEN_SOURCE_USAGE.md](OPEN_SOURCE_USAGE.md)
@@ -149,7 +151,7 @@ CodexQuotaBar 不提供账号系统，不上传凭证、额度或使用数据，
 
 CodexQuotaBar is a native macOS menu bar utility for Codex. It shows the 5-hour and weekly quota,
 Spark/Credits data, unverified subscription records, account status, and local token usage estimates.
-It is Codex-only, Apple-Silicon-only, local-first, and has no telemetry or account backend.
+It also shows Google Antigravity quotas for a selected Google account, with private file-backed credentials on the Mac. It runs on Apple Silicon and has no telemetry or account backend.
 
 The app reads the local Codex `auth.json`, supports multiple file-backed accounts, detects same-account
 token rotation, and keeps old refresh results from overwriting the active account. The chart supports

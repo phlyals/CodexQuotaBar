@@ -44,14 +44,12 @@ final class CodexDashboardStore: ObservableObject {
     self.currentAccountEmail = accountManager?.currentSystemEmail
     self.subscription = accountManager?.currentSubscription
     quotaStore.$snapshots
-      .receive(on: DispatchQueue.main)
       .sink { [weak self] snapshots in
         self?.quota = snapshots[.codex]
         self?.googleQuota = snapshots[.antigravity]
       }
       .store(in: &self.cancellables)
     quotaStore.$refreshingProviders
-      .receive(on: DispatchQueue.main)
       .sink { [weak self] in self?.refreshingProviders = $0 }
       .store(in: &self.cancellables)
     if let accountManager {
@@ -88,7 +86,7 @@ final class CodexDashboardStore: ObservableObject {
         let boundaryKey = "\(key):\(crossed.timeIntervalSince1970)"
         if self.lastBoundaryKey != boundaryKey {
           self.lastBoundaryKey = boundaryKey
-          self.quotaStore.refresh()
+          self.quotaStore.refresh(.codex)
         }
       }
     }

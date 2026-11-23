@@ -136,6 +136,11 @@ enum StatusBarQuotaFormatter {
 
     if let google {
       if google.hasQuotaData {
+        if let email = google.accountEmail {
+          lines.append("Google 账号：\(email)")
+        } else if google.source == GoogleQuotaSource.ambientCLI {
+          lines.append("Google 账号：全局 agy（不指定邮箱）")
+        }
         lines.append("Google Gemini 5h：\(Self.percent(google.session))，\(Self.resetText(google.session))")
         lines.append("Google Gemini 周额度：\(Self.percent(google.weekly))，\(Self.resetText(google.weekly))")
         lines.append("Google 更新：\(QuotaUpdateTimeFormatter.string(from: google.updatedAt))")
@@ -204,6 +209,7 @@ final class StatusBarQuotaController: NSObject, NSMenuDelegate, NSPopoverDelegat
   init(
     store: QuotaStore,
     accountManager: CodexAccountManager,
+    googleAccounts: GoogleAccountManager,
     launchAtLoginController: LaunchAtLoginController = LaunchAtLoginController(),
     assistant: QuotaAssistantModel? = nil,
     startsAutomatically: Bool = true,
@@ -228,7 +234,7 @@ final class StatusBarQuotaController: NSObject, NSMenuDelegate, NSPopoverDelegat
     self.dashboardMenuItem.setAccessibilityChildren([self.dashboardHostingView!])
     self.dashboardMenuItem.isEnabled = true
     self.configureButton()
-    self.configurePopover()
+    self.configurePopover(googleAccounts: googleAccounts)
     self.observeStore()
     self.update()
     guard startsAutomatically else { return }
@@ -238,7 +244,7 @@ final class StatusBarQuotaController: NSObject, NSMenuDelegate, NSPopoverDelegat
     ) { [weak self] _ in
       Task { @MainActor in
         self?.accountManager.reload()
-        self?.store.refresh()
+        self?.store.refreshIfStale()
         self?.dashboardStore.refreshLocalUsage(force: true)
       }
     }
@@ -256,7 +262,7 @@ final class StatusBarQuotaController: NSObject, NSMenuDelegate, NSPopoverDelegat
     button.sendAction(on: [.leftMouseUp, .rightMouseUp])
   }
 
-  private func configurePopover() {
+  private func configurePopover(googleAccounts: GoogleAccountManager) {
     let actions = QuotaPopoverActions(
       onRefresh: { [weak self] in self?.refresh() },
       onSwitchAccount: { [weak self] id in self?.switchAccount(id: id) },
@@ -274,7 +280,7 @@ final class StatusBarQuotaController: NSObject, NSMenuDelegate, NSPopoverDelegat
       },
       onNotificationSettings: { [weak self] in self?.openNotificationSettings() },
       onQuit: { [weak self] in self?.quit() })
-    let rootView = QuotaPopoverView(model: self.assistant, actions: actions)
+    let rootView = QuotaPopoverView(model: self.assistant, googleAccounts: googleAccounts, actions: actions)
     let hosting = NSHostingController(rootView: rootView)
     hosting.sizingOptions = [.preferredContentSize]
     let popover = NSPopover()
@@ -657,7 +663,7 @@ final class StatusBarQuotaController: NSObject, NSMenuDelegate, NSPopoverDelegat
       guard let self else { return }
       do {
         try await self.accountManager.addAccount()
-        self.store.refresh()
+        self.store.refresh(.codex)
         self.dashboardStore.refreshLocalUsage(force: true)
       } catch {
         self.showAccountError(title: "无法添加 Codex 账号", error: error)
@@ -684,7 +690,7 @@ final class StatusBarQuotaController: NSObject, NSMenuDelegate, NSPopoverDelegat
         self.dashboardStore.refreshLocalUsage(force: true)
         self.offerCodexRestartIfNeeded()
       } catch {
-        self.store.refresh()
+        self.store.refresh(.codex)
         self.dashboardStore.refreshLocalUsage(force: true)
         self.showAccountError(title: "无法切换 Codex 账号", error: error)
       }

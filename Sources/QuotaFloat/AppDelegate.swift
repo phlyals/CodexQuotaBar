@@ -156,7 +156,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     "com.apple.Terminal",
   ]
 
-  private lazy var store = QuotaStore(fetcher: CodexBarQuotaFetcher())
+  private lazy var googleAccounts = GoogleAccountManager()
+  private lazy var store = QuotaStore(
+    fetcher: CodexBarQuotaFetcher(googleAccountManager: self.googleAccounts),
+    googleBinding: { [googleAccounts] in GoogleQuotaBinding(manager: googleAccounts) })
   private lazy var accountManager = CodexAccountManager()
   private lazy var displayPreferences = DisplayPreferences()
   private lazy var contentPreferences = ContentPreferences()
@@ -191,6 +194,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let initialProviders: Set<QuotaProvider> =
       StatusBarQuotaController.isGoogleQuotaEnabled ? [.codex, .antigravity] : [.codex]
     self.contentPreferences.setSelectedProviders(initialProviders)
+    self.googleAccounts.onSelectionChange = { [weak self] in
+      self?.store.invalidateAndRefresh(.antigravity)
+    }
     self.store.setActiveProviders(initialProviders)
     self.codexAuthMonitor = CodexAuthMonitor { [weak self] change in
       guard let self else { return }
@@ -200,12 +206,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
       case .accountChanged:
         self.store.invalidateAndRefresh(.codex)
       case .credentialsRotated, .metadataChanged:
-        self.store.refresh()
+        self.store.refresh(.codex)
       }
     }
     self.statusBarController = StatusBarQuotaController(
       store: self.store,
       accountManager: self.accountManager,
+      googleAccounts: self.googleAccounts,
       onAuthMutation: { [weak self] in
         self?.codexAuthMonitor?.acceptCurrentState()
       })

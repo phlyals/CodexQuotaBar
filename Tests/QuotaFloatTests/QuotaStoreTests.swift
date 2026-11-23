@@ -1,3 +1,4 @@
+import CodexBarCore
 import Foundation
 import XCTest
 
@@ -102,6 +103,93 @@ final class QuotaStoreTests: XCTestCase {
     let matching = QuotaStore(
       fetcher: SequencedQuotaFetcher(), cacheStore: cache, identityProvider: { "account-b" })
     XCTAssertEqual(matching.snapshot(for: .codex)?.freshness, .cached)
+  }
+
+  @MainActor
+  func testGoogleCacheRequiresMatchingEmailOrExplicitAmbientSource() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let cache = QuotaCacheStore(fileURL: root.appendingPathComponent("cache.json"))
+    let bound = GoogleQuotaBinding.saved(email: "One@example.test")
+    for (binding, key, email, source, expected) in [
+      (bound, "one@example.test", "One@example.test", "google-oauth-remote", true),
+      (bound, "two@example.test", "Two@example.test", "agy-cli-scoped", false),
+      (bound, "one@example.test", "Two@example.test", "agy-cli-scoped", false),
+      (bound, "one@example.test", "One@example.test", "local", false),
+      (bound, "antigravity", nil, "agy-cli-ambient", false),
+      (.ambient, "one@example.test", "One@example.test", "google-oauth-remote", false),
+      (.ambient, "antigravity", nil, "agy-cli", false),
+      (.ambient, "antigravity", nil, "agy-cli-ambient", true),
+      (.unreadable, "antigravity", nil, "agy-cli-ambient", false),
+    ] {
+      cache.save([QuotaSnapshot(
+        provider: .antigravity, session: .init(usedPercent: 11, resetsAt: nil, windowMinutes: 300),
+        weekly: nil, resetCredits: nil, accountEmail: email, accountKey: key, source: source,
+        updatedAt: Date(), freshness: .fresh, message: nil)])
+      let store = QuotaStore(cacheStore: cache, googleBinding: { binding })
+      XCTAssertEqual(store.snapshot(for: .antigravity) != nil, expected)
+    }
+  }
+
+  @MainActor
+  func testGoogleSwitchClearsMenuAndCacheAndRejectsLateResults() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let identity = FixtureIdentity("One@example.test")
+    let accounts = GoogleAccountManager(fileURL: root.appendingPathComponent("google.json")) {
+      AntigravityOAuthCredentials(
+        accessToken: "fixture", refreshToken: "fixture", expiryDate: .distantFuture,
+        email: identity.value)
+    }
+    let cache = QuotaCacheStore(fileURL: root.appendingPathComponent("cache.json"))
+    let fetcher = ControlledQuotaFetcher()
+    let store = QuotaStore(fetcher: fetcher, cacheStore: cache,
+      googleBinding: { GoogleQuotaBinding(manager: accounts) })
+    accounts.onSelectionChange = { store.invalidateAndRefresh(.antigravity) }
+    let dashboard = CodexDashboardStore(quotaStore: store)
+    store.setActiveProviders([.antigravity])
+    XCTAssertEqual(store.retryInterval(.antigravity), 300)
+    XCTAssertEqual(store.staleRefreshAge(for: .antigravity, maxAge: 15), 45)
+    store.start()
+    defer { store.stop() }
+    try await fetcher.waitForCount(1)
+    try await accounts.addAccount()
+    try await fetcher.waitForCount(2)
+    XCTAssertEqual(store.retryInterval(.antigravity), 60)
+    XCTAssertEqual(store.staleRefreshAge(for: .antigravity, maxAge: 15), 15)
+    await fetcher.complete(1, accountKey: "one@example.test")
+    for _ in 0..<200 {
+      if !store.isRefreshing { break }
+      try await Task.sleep(for: .milliseconds(5))
+    }
+    XCTAssertEqual(dashboard.googleQuota?.accountKey, "one@example.test")
+    store.refresh()
+    try await fetcher.waitForCount(3)
+    identity.value = "Two@example.test"
+    try await accounts.addAccount()
+    XCTAssertNil(dashboard.googleQuota)
+    XCTAssertTrue(cache.load().isEmpty)
+    try await fetcher.waitForCount(4)
+    await fetcher.complete(3, accountKey: "two@example.test")
+    await fetcher.complete(2, accountKey: "one@example.test")
+    await fetcher.complete(0)
+    for _ in 0..<200 {
+      if !store.isRefreshing { break }
+      try await Task.sleep(for: .milliseconds(5))
+    }
+    XCTAssertEqual(dashboard.googleQuota?.accountKey, "two@example.test")
+    XCTAssertEqual(cache.load().first?.accountKey, "two@example.test")
+    try accounts.removeAccount(id: XCTUnwrap(accounts.selectedAccountID))
+    XCTAssertNil(dashboard.googleQuota)
+    XCTAssertTrue(cache.load().isEmpty)
+    try await fetcher.waitForCount(5)
+    await fetcher.complete(4, accountKey: "two@example.test")
+    for _ in 0..<200 {
+      if !store.isRefreshing { break }
+      try await Task.sleep(for: .milliseconds(5))
+    }
+    XCTAssertEqual(dashboard.googleQuota?.hasQuotaData, false)
+    XCTAssertTrue(cache.load().isEmpty)
   }
 
   @MainActor
@@ -221,16 +309,25 @@ private actor ControlledQuotaFetcher: QuotaFetching {
     return await withCheckedContinuation { pending[index] = $0 }
   }
 
+  func waitForCount(_ expected: Int) async throws {
+    for _ in 0..<200 {
+      if count >= expected { return }
+      try await Task.sleep(for: .milliseconds(5))
+    }
+    XCTFail("Missing quota request \(expected)")
+  }
+
   func complete(_ index: Int, accountKey: String? = nil) {
     guard let continuation = self.pending.removeValue(forKey: index) else { return }
+    let google = self.providers[index] == .antigravity
     continuation.resume(
       returning: QuotaSnapshot(
         provider: self.providers[index],
         session: QuotaWindow(usedPercent: Double(index), resetsAt: nil, windowMinutes: 300),
         weekly: nil,
-        resetCredits: nil, accountEmail: "fixture@example.test",
+        resetCredits: nil, accountEmail: google ? accountKey : "fixture@example.test",
         accountKey: accountKey ?? "account-\(index)",
-        source: "fixture", updatedAt: Date(), freshness: .fresh, message: nil))
+        source: google ? (accountKey == nil ? "agy-cli-ambient" : "google-oauth-remote") : "fixture", updatedAt: Date(), freshness: .fresh, message: nil))
   }
 }
 

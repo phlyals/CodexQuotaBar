@@ -19,7 +19,7 @@ protocol CodexSubscriptionTransport: Sendable {
   func read(_ request: URLRequest) async throws -> (Data, Int)
 }
 
-private final class SubscriptionRedirectGuard: NSObject, URLSessionTaskDelegate, Sendable {
+final class CredentialRedirectGuard: NSObject, URLSessionTaskDelegate, Sendable {
   func urlSession(
     _ session: URLSession, task: URLSessionTask,
     willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
@@ -32,7 +32,7 @@ private final class SubscriptionRedirectGuard: NSObject, URLSessionTaskDelegate,
 struct SystemCodexSubscriptionTransport: CodexSubscriptionTransport {
   func read(_ request: URLRequest) async throws -> (Data, Int) {
     let session = URLSession(
-      configuration: .ephemeral, delegate: SubscriptionRedirectGuard(), delegateQueue: nil)
+      configuration: .ephemeral, delegate: CredentialRedirectGuard(), delegateQueue: nil)
     defer { session.invalidateAndCancel() }
     let (data, response) = try await session.data(for: request)
     guard let http = response as? HTTPURLResponse, data.count < 1_000_000 else {

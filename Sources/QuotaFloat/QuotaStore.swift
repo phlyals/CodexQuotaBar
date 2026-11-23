@@ -7,6 +7,42 @@ private struct QuotaRefreshOutcome: Sendable {
   let wasCancelled: Bool
 }
 
+enum GoogleQuotaBinding: Equatable {
+  case ambient
+  case saved(email: String)
+  case unreadable
+
+  var accountKey: String? {
+    if case .saved(let email) = self { return email.lowercased() }
+    return nil
+  }
+
+  func accepts(_ snapshot: QuotaSnapshot) -> Bool {
+    guard snapshot.provider == .antigravity else { return false }
+    switch self {
+    case .ambient:
+      return snapshot.source == GoogleQuotaSource.ambientCLI && snapshot.accountEmail == nil
+    case .saved:
+      return [GoogleQuotaSource.remote, GoogleQuotaSource.scopedCLI, GoogleQuotaSource.remoteAndScopedCLI].contains(snapshot.source)
+        && snapshot.accountKey == self.accountKey
+        && snapshot.accountEmail?.lowercased() == self.accountKey
+    case .unreadable:
+      return false
+    }
+  }
+
+  @MainActor
+  init(manager: GoogleAccountManager) {
+    if manager.loadError != nil {
+      self = .unreadable
+    } else if let account = manager.selectedAccount {
+      self = .saved(email: account.email)
+    } else {
+      self = .ambient
+    }
+  }
+}
+
 enum QuotaRefreshPolicy {
   static func isDue(
     lastAttemptAt: Date?,
@@ -21,7 +57,7 @@ enum QuotaRefreshPolicy {
 @MainActor
 final class QuotaStore: ObservableObject {
   static let defaultRefreshInterval: TimeInterval = 60
-  static let antigravityRefreshInterval: TimeInterval = 300
+  static let ambientGoogleRefreshInterval: TimeInterval = 300
   static let defaultStaleAfter: TimeInterval = 300
 
   @Published private(set) var snapshots: [QuotaProvider: QuotaSnapshot] = [:]
@@ -35,6 +71,7 @@ final class QuotaStore: ObservableObject {
   private let refreshInterval: TimeInterval
   private let staleAfter: TimeInterval
   private let identityProvider: @MainActor () -> String?
+  private let googleBinding: @MainActor () -> GoogleQuotaBinding
   private var failureCounts: [QuotaProvider: Int] = [:]
   private var activeProviders: Set<QuotaProvider> = [.codex]
   private var lastAttemptByProvider: [QuotaProvider: Date] = [:]
@@ -49,6 +86,7 @@ final class QuotaStore: ObservableObject {
     cacheStore: QuotaCacheStore = QuotaCacheStore(),
     refreshInterval: TimeInterval = QuotaStore.defaultRefreshInterval,
     staleAfter: TimeInterval = QuotaStore.defaultStaleAfter,
+    googleBinding: @escaping @MainActor () -> GoogleQuotaBinding = { .ambient },
     identityProvider: @escaping @MainActor () -> String? = {
       CodexAuthIdentityReader().read()?.cacheKey
     }
@@ -58,6 +96,7 @@ final class QuotaStore: ObservableObject {
     self.refreshInterval = refreshInterval
     self.staleAfter = staleAfter
     self.identityProvider = identityProvider
+    self.googleBinding = googleBinding
 
     let now = Date()
     self.snapshots = Dictionary(
@@ -65,7 +104,7 @@ final class QuotaStore: ObservableObject {
         if snapshot.provider == .codex {
           return snapshot.accountKey != nil && snapshot.accountKey == identityProvider()
         }
-        return true
+        return googleBinding().accepts(snapshot)
       }.map { snapshot in
         (snapshot.provider, snapshot.markingCached(now: now, staleAfter: staleAfter))
       }, uniquingKeysWith: { first, second in first.updatedAt > second.updatedAt ? first : second })
@@ -118,6 +157,10 @@ final class QuotaStore: ObservableObject {
     self.refresh(providers: self.activeProviders, force: true)
   }
 
+  func refresh(_ provider: QuotaProvider) {
+    self.refresh(providers: [provider], force: true)
+  }
+
   func refreshIfStale(maxAge: TimeInterval = 15) {
     let now = Date()
     let due = self.activeProviders.filter { provider in
@@ -125,9 +168,7 @@ final class QuotaStore: ObservableObject {
       let lastRefresh = max(
         self.lastAttemptByProvider[provider] ?? .distantPast,
         self.lastCompletionByProvider[provider] ?? .distantPast)
-      let effectiveMaxAge =
-        (provider == .antigravity && self.refreshInterval == Self.defaultRefreshInterval)
-        ? max(maxAge, 45) : maxAge
+      let effectiveMaxAge = self.staleRefreshAge(for: provider, maxAge: maxAge)
       return now.timeIntervalSince(lastRefresh) >= effectiveMaxAge
     }
     guard !due.isEmpty else { return }
@@ -146,6 +187,7 @@ final class QuotaStore: ObservableObject {
     self.snapshots.removeValue(forKey: provider)
     self.lastAttemptByProvider.removeValue(forKey: provider)
     self.lastCompletionByProvider.removeValue(forKey: provider)
+    self.failureCounts.removeValue(forKey: provider)
     self.cacheStore.save(Array(self.snapshots.values))
     self.refresh(providers: [provider], force: true)
   }
@@ -207,7 +249,7 @@ final class QuotaStore: ObservableObject {
       }
       accountKey = codexKey
     } else {
-      accountKey = nil
+      accountKey = self.googleBinding().accountKey
     }
     self.inFlightTokens[provider] = token
 
@@ -270,12 +312,9 @@ final class QuotaStore: ObservableObject {
     self.inFlightTasks.removeValue(forKey: outcome.provider)
     self.inFlightTokens.removeValue(forKey: outcome.provider)
 
-    if outcome.provider == .codex, self.identityProvider() != accountKey {
-      self.snapshots.removeValue(forKey: outcome.provider)
-      self.lastAttemptByProvider.removeValue(forKey: outcome.provider)
-      self.lastCompletionByProvider.removeValue(forKey: outcome.provider)
-      self.refreshingProviders.remove(outcome.provider)
-      self.refresh(providers: [outcome.provider], force: true)
+    let currentKey = outcome.provider == .codex ? self.identityProvider() : self.googleBinding().accountKey
+    if currentKey != accountKey {
+      self.invalidateAndRefresh(outcome.provider)
       return
     }
 
@@ -283,9 +322,10 @@ final class QuotaStore: ObservableObject {
     self.lastCompletionByProvider[outcome.provider] = now
     if !outcome.wasCancelled {
       if let snapshot = outcome.snapshot {
-        if outcome.provider != .codex || snapshot.accountKey == nil
-          || snapshot.accountKey == accountKey
-        {
+        let matchesIdentity = outcome.provider == .codex
+          ? snapshot.provider == .codex && (snapshot.accountKey == nil || snapshot.accountKey == accountKey)
+          : self.googleBinding().accepts(snapshot)
+        if matchesIdentity {
           var updated = snapshot.replacing(
             freshness: snapshot.freshness, message: snapshot.message,
             accountKey: accountKey ?? snapshot.accountKey)
@@ -341,25 +381,35 @@ final class QuotaStore: ObservableObject {
     }
   }
 
-  private func retryInterval(_ provider: QuotaProvider) -> TimeInterval {
-    let baseInterval =
-      (provider == .antigravity && self.refreshInterval == Self.defaultRefreshInterval)
-      ? Self.antigravityRefreshInterval : self.refreshInterval
+  private func usesAmbientInterval(_ provider: QuotaProvider) -> Bool {
+    provider == .antigravity && self.googleBinding() == .ambient
+      && self.refreshInterval == Self.defaultRefreshInterval
+  }
+
+  func staleRefreshAge(for provider: QuotaProvider, maxAge: TimeInterval) -> TimeInterval {
+    self.usesAmbientInterval(provider) ? max(maxAge, 45) : maxAge
+  }
+
+  func retryInterval(_ provider: QuotaProvider) -> TimeInterval {
+    let baseInterval = self.usesAmbientInterval(provider) ? Self.ambientGoogleRefreshInterval : self.refreshInterval
     return min(
       900, baseInterval * pow(2, Double(min(3, self.failureCounts[provider, default: 0]))))
   }
 
   private func applyFailure(provider: QuotaProvider, message: String, now: Date) {
-    if let previous = self.snapshots[provider], previous.hasQuotaData {
+    let displayMessage = self.userFacingMessage(provider: provider, message: message)
+    if let previous = self.snapshots[provider], previous.hasQuotaData,
+      provider == .codex || self.googleBinding().accepts(previous)
+    {
       let retained = previous.markingFailure(
-        Self.userFacingMessage(provider: provider, message: message),
+        displayMessage,
         now: now,
         staleAfter: self.staleAfter)
       self.snapshots[provider] =
         Self.failureState(message) == .authRequired
         ? retained.replacing(
           freshness: .authRequired,
-          message: Self.userFacingMessage(provider: provider, message: message))
+          message: displayMessage)
         : retained
       return
     }
@@ -370,23 +420,25 @@ final class QuotaStore: ObservableObject {
       weekly: nil,
       resetCredits: nil,
       accountEmail: nil,
-      accountKey: provider == .codex ? self.identityProvider() : "antigravity",
+      accountKey: provider == .codex ? self.identityProvider() : self.googleBinding().accountKey,
       source: "auto",
       updatedAt: now,
       freshness: Self.failureState(message),
-      message: Self.userFacingMessage(provider: provider, message: message))
+      message: displayMessage)
   }
 
   private static func failureState(_ message: String) -> QuotaFreshness {
+    if message == GoogleAccountError.invalidIdentity.localizedDescription
+      || message == GoogleOAuthError.invalidToken.localizedDescription { return .authRequired }
     let lower = message.lowercased()
     let authMarkers = [
       "401", "unauthorized", "token", "credential", "api key", "login", "log in", "authenticate",
-      "scope",
+      "scope", "invalid_grant",
     ]
     return authMarkers.contains(where: lower.contains) ? .authRequired : .unavailable
   }
 
-  private static func userFacingMessage(provider: QuotaProvider, message: String) -> String {
+  private func userFacingMessage(provider: QuotaProvider, message: String) -> String {
     switch provider {
     case .codex:
       return switch Self.failureState(message) {
@@ -396,6 +448,18 @@ final class QuotaStore: ObservableObject {
         "额度读取失败，保留上次数据；请稍后刷新"
       }
     case .antigravity:
+      if message == QuotaFetchError.unsupportedAgyVersion.localizedDescription
+        || message == GoogleAccountError.invalidIdentity.localizedDescription { return message }
+      switch self.googleBinding() {
+      case .unreadable:
+        return "无法读取本机 Google 账号文件，已暂停额度查询"
+      case .saved:
+        return Self.failureState(message) == .authRequired
+          ? "Google 授权已失效，请重新添加该邮箱"
+          : "所选 Google 账号的额度暂时不可用，请稍后刷新"
+      case .ambient:
+        break
+      }
       return switch Self.failureState(message) {
       case .authRequired:
         "Antigravity 未登录，请在终端运行 agy 登录后刷新"

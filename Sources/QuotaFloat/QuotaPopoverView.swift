@@ -27,6 +27,7 @@ struct QuotaPopoverActions {
 
 struct QuotaPopoverView: View {
   @ObservedObject var dashboard: CodexDashboardStore
+  @ObservedObject var googleAccounts: GoogleAccountManager
   @ObservedObject var accounts: CodexAccountManager
   @ObservedObject var history: QuotaHistory
   @ObservedObject var notifications: QuotaNotificationService
@@ -34,6 +35,8 @@ struct QuotaPopoverView: View {
 
   @State private var selectedTab: QuotaPopoverTab = .overview
   @State private var isAccountDrawerOpen = false
+  @State private var isGoogleDrawerOpen = false
+  @State private var googleAccountError: String?
   @State private var showExtraGooglePools = false
   @State private var hoveredDayID: String?
   @State private var pinnedDayID: String?
@@ -46,7 +49,8 @@ struct QuotaPopoverView: View {
   private let popoverWidth: CGFloat = 328
   private let track = Color.primary.opacity(0.10)
 
-  init(model: QuotaAssistantModel, actions: QuotaPopoverActions) {
+  init(model: QuotaAssistantModel, googleAccounts: GoogleAccountManager, actions: QuotaPopoverActions) {
+    self.googleAccounts = googleAccounts
     self.dashboard = model.dashboard
     self.accounts = model.accounts
     self.history = model.history
@@ -302,6 +306,31 @@ struct QuotaPopoverView: View {
           .foregroundStyle(Color(red: 0.24, green: 0.72, blue: 0.50))
         Text("Google · Antigravity")
           .font(.system(size: 12, weight: .semibold))
+        Spacer(minLength: 4)
+        Button {
+          withAnimation(.easeOut(duration: 0.16)) { self.isGoogleDrawerOpen.toggle() }
+        } label: {
+          HStack(spacing: 3) {
+            Text(self.googleAccounts.selectedAccount?.email ?? "绑定账号")
+              .lineLimit(1)
+              .truncationMode(.middle)
+            Image(systemName: self.isGoogleDrawerOpen ? "chevron.up" : "chevron.down")
+          }
+          .font(.system(size: 10.5, weight: .medium))
+          .padding(.horizontal, 7)
+          .padding(.vertical, 3)
+          .background(Color.primary.opacity(0.07), in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .help(self.googleAccounts.selectedAccount?.email ?? "选择或绑定 Google 账号")
+      }
+      if self.isGoogleDrawerOpen {
+        self.googleAccountDrawer
+      }
+      if let error = self.googleAccountError ?? self.googleAccounts.loadError {
+        Text(error).font(.caption).foregroundStyle(.orange)
+      }
+      HStack(spacing: 4) {
         if let plan = google?.accountPlan, !plan.isEmpty {
           Text(plan)
             .font(.system(size: 9.5, weight: .medium))
@@ -312,13 +341,6 @@ struct QuotaPopoverView: View {
             .lineLimit(1)
         }
         Spacer(minLength: 4)
-        if let email = google?.accountEmail, !email.isEmpty {
-          Text(email)
-            .font(.system(size: 10))
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-            .truncationMode(.middle)
-        }
         HStack(spacing: 4) {
           if self.dashboard.isRefreshingGoogle {
             ProgressView().controlSize(.mini)
@@ -374,6 +396,12 @@ struct QuotaPopoverView: View {
           .font(.system(size: 11))
           .foregroundStyle(.secondary)
       }
+      if self.googleAccounts.selectedAccount == nil && self.googleAccounts.loadError == nil {
+        Text("当前读取全局 CLI，绑定账号可精准切换邮箱且不干扰客户端")
+          .font(.system(size: 10))
+          .foregroundStyle(.secondary)
+          .fixedSize(horizontal: false, vertical: true)
+      }
     }
     .padding(10)
     .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -381,6 +409,87 @@ struct QuotaPopoverView: View {
       RoundedRectangle(cornerRadius: 10, style: .continuous)
         .stroke(Color.primary.opacity(0.08), lineWidth: 0.8)
     }
+  }
+
+  private var googleAccountDrawer: some View {
+    VStack(alignment: .leading, spacing: 5) {
+      self.googleAccountChoice(id: nil, title: "全局 agy（不指定邮箱）")
+      ForEach(self.googleAccounts.accounts) { account in
+        HStack(spacing: 4) {
+          self.googleAccountChoice(id: account.id, title: account.email)
+          Button {
+            do {
+              try self.googleAccounts.removeAccount(id: account.id)
+              self.googleAccountError = nil
+            } catch {
+              self.googleAccountError = error.localizedDescription
+            }
+          } label: {
+            Image(systemName: "trash").frame(width: 22, height: 22)
+          }
+          .buttonStyle(.plain)
+          .help("移除 \(account.email)")
+          .accessibilityLabel("移除 \(account.email)")
+        }
+      }
+      Divider()
+      Text("QuotaFloat 使用 Antigravity 的 Google 授权流程。所选邮箱的凭据会保存在这台 Mac，用于查询额度。")
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+        .fixedSize(horizontal: false, vertical: true)
+      Button {
+        self.googleAccountError = nil
+        Task { @MainActor in
+          do {
+            try await self.googleAccounts.addAccount()
+            self.isGoogleDrawerOpen = false
+          } catch {
+            self.googleAccountError = error.localizedDescription
+          }
+        }
+      } label: {
+        HStack(spacing: 5) {
+          if self.googleAccounts.isBusy {
+            ProgressView().controlSize(.mini)
+            Text("等待 Google 授权…")
+          } else {
+            Label("添加 Google 账号…", systemImage: "plus.circle")
+          }
+        }
+        .foregroundStyle(Color.accentColor)
+        .padding(.vertical, 3)
+      }
+      .buttonStyle(.plain)
+    }
+    .disabled(self.googleAccounts.isBusy || self.googleAccounts.loadError != nil)
+    .font(.system(size: 11))
+    .padding(7)
+    .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 6))
+  }
+
+  private func googleAccountChoice(id: UUID?, title: String) -> some View {
+    let selected = self.googleAccounts.selectedAccountID == id
+    return Button {
+      do {
+        try self.googleAccounts.selectAccount(id: id)
+        self.googleAccountError = nil
+        self.isGoogleDrawerOpen = false
+      } catch {
+        self.googleAccountError = error.localizedDescription
+      }
+    } label: {
+      HStack(spacing: 5) {
+        Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+          .foregroundStyle(selected ? Color.accentColor : .secondary)
+        Text(title).lineLimit(1).truncationMode(.middle)
+        Spacer(minLength: 2)
+      }
+      .contentShape(Rectangle())
+      .padding(.vertical, 3)
+    }
+    .buttonStyle(.plain)
+    .help(title)
+    .accessibilityAddTraits(selected ? .isSelected : [])
   }
 
   private func compactQuotaRow(title: String, window: QuotaWindow?) -> some View {
